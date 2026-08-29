@@ -1,0 +1,61 @@
+<?php
+
+namespace App\Policies;
+
+use App\Models\Attachment;
+use App\Models\User;
+use Illuminate\Database\Eloquent\Builder;
+
+class AttachmentPolicy
+{
+    public function viewAny(User $user): bool
+    {
+        return true;
+    }
+
+    public function view(User $user, Attachment $attachment): bool
+    {
+        if ($attachment->isOwnedBy($user)) {
+            return true;
+        }
+
+        return $attachment->entry?->shares()
+            ->whereNull('revoked_at')
+            ->where(function (Builder $query): void {
+                $query->whereNull('expires_at')->orWhere('expires_at', '>', now());
+            })
+            ->whereBelongsTo($user, 'recipient')
+            ->where('include_attachments', true)
+            ->exists() === true;
+    }
+
+    public function create(User $user): bool
+    {
+        return true;
+    }
+
+    public function update(User $user, Attachment $attachment): bool
+    {
+        return $attachment->isOwnedBy($user);
+    }
+
+    public function delete(User $user, Attachment $attachment): bool
+    {
+        return $attachment->isOwnedBy($user);
+    }
+
+    public function restore(User $user, Attachment $attachment): bool
+    {
+        return $attachment->isOwnedBy($user);
+    }
+
+    public function forceDelete(User $user, Attachment $attachment): bool
+    {
+        return $attachment->isOwnedBy($user);
+    }
+
+    public function download(User $user, Attachment $attachment): bool
+    {
+        return $this->view($user, $attachment);
+    }
+}

@@ -1,0 +1,63 @@
+@import '../../../../vendor/filament/filament/resources/css/theme.css';
+
+@source '../../../../app/Filament/Admin/**/*';
+@source '../../../../resources/views/filament/admin/**/*';
+
+:root {
+    --admin-surface: #f7f7f4;
+}
+
+.dark {
+    --admin-surface: #191b19;
+}
+
+.fi-body {
+    background: var(--admin-surface);
+}
+
+.fi-page-heading {
+    letter-spacing: -0.025em;
+}
+
+.fi-section,
+.fi-ta-ctn,
+.fi-wi-stats-overview-stat {
+    border-radius: 0.5rem;
+    box-shadow: 0 1px 1px rgb(20 24 20 / 0.03), 0 8px 24px rgb(20 24 20 / 0.05);
+}
+
+.fi-sidebar-group-label,
+.fi-account-widget-user-name,
+.fi-section-header-description,
+.fi-wi-stats-overview-stat-label,
+.fi-wi-stats-overview-stat-description,
+.fi-wi-stats-overview-stat-description.fi-color {
+    color: var(--gray-700) !important;
+}
+
+.fi-breadcrumbs-item-label,
+.fi-ta-placeholder {
+    color: var(--gray-700) !important;
+}
+
+.dark .fi-sidebar-group-label,
+.dark .fi-account-widget-user-name,
+.dark .fi-section-header-description,
+.dark .fi-wi-stats-overview-stat-label,
+.dark .fi-wi-stats-overview-stat-description,
+.dark .fi-wi-stats-overview-stat-description.fi-color {
+    color: var(--gray-200) !important;
+}
+
+.dark .fi-breadcrumbs-item-label,
+.dark .fi-ta-placeholder {
+    color: var(--gray-200) !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+        transition-duration: 0.01ms !important;
+    }
+}

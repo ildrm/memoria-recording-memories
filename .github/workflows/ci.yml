@@ -1,0 +1,88 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: memoria_test
+          POSTGRES_USER: memoria
+          POSTGRES_PASSWORD: memoria
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U memoria -d memoria_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      APP_ENV: testing
+      APP_KEY: base64:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+      APP_DEBUG: false
+      DB_CONNECTION: pgsql
+      DB_HOST: 127.0.0.1
+      DB_PORT: 5432
+      DB_DATABASE: memoria_test
+      DB_USERNAME: memoria
+      DB_PASSWORD: memoria
+      CACHE_STORE: array
+      MAIL_MAILER: array
+      QUEUE_CONNECTION: sync
+      SESSION_DRIVER: array
+      MEMORIA_SOCIAL_DRIVER: fake
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.5'
+          extensions: exif, gd, intl, mbstring, pdo_pgsql, sockets, zip
+          coverage: none
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+
+      - name: Validate Composer metadata
+        run: composer validate --strict
+
+      - name: Install PHP dependencies
+        run: composer install --no-interaction --prefer-dist --no-progress
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Audit PHP dependencies
+        run: composer audit
+
+      - name: Audit frontend dependencies
+        run: npm audit --audit-level=high
+
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Migrate and seed
+        run: php artisan migrate:fresh --seed --force
+
+      - name: Format check
+        run: vendor/bin/pint --test
+
+      - name: Static analysis
+        run: composer analyse
+
+      - name: Build assets
+        run: npm run build
+
+      - name: Test
+        run: php artisan test --compact

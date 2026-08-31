@@ -29,10 +29,18 @@ class DispatchPendingStoredFileDeletions implements ShouldBeUnique, ShouldQueue
     {
         DB::table('stored_file_deletions')
             ->whereNull('completed_at')
-            ->whereNull('failed_at')
             ->where(function (Builder $query): void {
-                $query->whereNull('last_attempted_at')
-                    ->orWhere('last_attempted_at', '<=', now()->subMinutes(5));
+                $query->where(function (Builder $pendingQuery): void {
+                    $pendingQuery->whereNull('failed_at')
+                        ->where(function (Builder $attemptQuery): void {
+                            $attemptQuery->whereNull('last_attempted_at')
+                                ->orWhere('last_attempted_at', '<=', now()->subMinutes(5));
+                        });
+                })->orWhere(
+                    'failed_at',
+                    '<=',
+                    now()->subHours((int) config('memoria.file_cleanup.retry_failed_after_hours', 24)),
+                );
             })
             ->orderBy('id')
             ->limit((int) config('memoria.scheduler.batch_size', 100))

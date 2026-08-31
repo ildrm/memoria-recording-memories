@@ -7,6 +7,11 @@ return [
         ],
     ],
 
+    'legal' => [
+        'privacy_notice_url' => env('MEMORIA_PRIVACY_NOTICE_URL'),
+        'terms_of_service_url' => env('MEMORIA_TERMS_OF_SERVICE_URL'),
+    ],
+
     'rich_text' => [
         'maximum_characters' => 125000,
     ],
@@ -64,6 +69,10 @@ return [
         'expiration_hours' => (int) env('MEMORIA_EXPORT_EXPIRATION_HOURS', 72),
         'chunk_size' => (int) env('MEMORIA_EXPORT_CHUNK_SIZE', 100),
         'directory' => env('MEMORIA_EXPORT_DIRECTORY', 'exports'),
+    ],
+
+    'file_cleanup' => [
+        'retry_failed_after_hours' => max(1, (int) env('MEMORIA_FILE_CLEANUP_RETRY_HOURS', 24)),
     ],
 
     'social' => [

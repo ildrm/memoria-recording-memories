@@ -11,6 +11,8 @@ use App\Filament\App\Resources\PublicationResource\Pages\CreatePublication;
 use App\Filament\App\Resources\ShareLinkResource\Pages\CreateShareLink as CreateShareLinkPage;
 use App\Filament\App\Resources\ShareLinkResource\Pages\EditShareLink as EditShareLinkPage;
 use App\Filament\App\Resources\SocialAccountResource\Pages\ListSocialAccounts;
+use App\Http\Middleware\PrivateResponse;
+use App\Http\Middleware\SecurityHeaders;
 use App\Models\Comment;
 use App\Models\Entry;
 use App\Models\Export;
@@ -130,6 +132,8 @@ test('every Livewire update request uses the global update budget', function ():
         ->not->toBeNull()
         ->and($route?->gatherMiddleware())
         ->toContain('throttle:livewire-updates')
+        ->toContain(PrivateResponse::class)
+        ->toContain(SecurityHeaders::class)
         ->and(config('livewire.payload.max_calls'))
         ->toBe(20);
 
@@ -143,6 +147,26 @@ test('every Livewire update request uses the global update budget', function ():
         ->postJson($uri, ['components' => []])
         ->assertTooManyRequests()
         ->assertHeader('Retry-After');
+});
+
+test('Livewire temporary uploads and previews use private bounded endpoints', function (): void {
+    $uploadRoute = Route::getRoutes()->getByName('livewire.upload-file');
+    $previewRoute = Route::getRoutes()->getByName('livewire.preview-file');
+
+    foreach ([$uploadRoute, $previewRoute] as $route) {
+        expect($route)
+            ->not->toBeNull()
+            ->and($route?->gatherMiddleware())
+            ->toContain(PrivateResponse::class)
+            ->toContain(SecurityHeaders::class);
+    }
+
+    expect($uploadRoute?->gatherMiddleware())
+        ->toContain('throttle:attachment-uploads')
+        ->and(config('livewire.temporary_file_upload.rules'))
+        ->toBe(['required', 'file', 'max:20480'])
+        ->and(config('livewire.temporary_file_upload.preview_mimes'))
+        ->toBe(['png', 'jpg', 'jpeg', 'webp']);
 });
 
 test('filament export and attachment upload actions consume their purpose budgets', function (): void {

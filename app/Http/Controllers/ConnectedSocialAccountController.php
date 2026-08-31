@@ -7,11 +7,12 @@ use App\Actions\DisconnectSocialAccount;
 use App\Enums\SocialProvider;
 use App\Models\SocialAccount;
 use App\Models\User;
-use App\Services\SocialOnboardingReadiness;
 use App\Services\Social\Exceptions\SanitizedSocialIntegrationException;
+use App\Services\SocialOnboardingReadiness;
 use Filament\Notifications\Notification;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
+use Illuminate\Http\Response;
 use Illuminate\Support\Facades\Gate;
 use Illuminate\Validation\ValidationException;
 use Laravel\Socialite\Facades\Socialite;
@@ -25,10 +26,12 @@ class ConnectedSocialAccountController extends Controller
         Request $request,
         SocialProvider $provider,
         SocialOnboardingReadiness $readiness,
-    ): RedirectResponse {
+    ): RedirectResponse|Response {
         Gate::authorize('create', SocialAccount::class);
         $state = $readiness->for($provider);
-        abort_unless($state['available'], 422, $state['message']);
+        if (! $state['available']) {
+            return $this->unavailableResponse($state['message']);
+        }
 
         $reconnectAccountId = $request->integer('reconnect');
         $sessionKey = $this->reconnectSessionKey($provider);
@@ -61,10 +64,12 @@ class ConnectedSocialAccountController extends Controller
         SocialProvider $provider,
         ConnectSocialAccount $connectSocialAccount,
         SocialOnboardingReadiness $readiness,
-    ): RedirectResponse {
+    ): RedirectResponse|Response {
         Gate::authorize('create', SocialAccount::class);
         $state = $readiness->for($provider);
-        abort_unless($state['available'], 422, $state['message']);
+        if (! $state['available']) {
+            return $this->unavailableResponse($state['message']);
+        }
         $configuration = config("memoria.social.providers.{$provider->value}");
         $driver = is_array($configuration) ? ($configuration['socialite_driver'] ?? null) : null;
         abort_unless(is_string($driver) && $driver !== '', 404);
@@ -144,5 +149,12 @@ class ConnectedSocialAccountController extends Controller
     private function reconnectSessionKey(SocialProvider $provider): string
     {
         return "memoria.social.reconnect.{$provider->value}";
+    }
+
+    private function unavailableResponse(string $message): Response
+    {
+        return response()->view('errors.social-connection-unavailable', [
+            'description' => $message,
+        ], 422);
     }
 }

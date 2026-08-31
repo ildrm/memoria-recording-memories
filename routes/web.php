@@ -9,6 +9,7 @@ use App\Http\Controllers\EntryShareController;
 use App\Http\Controllers\EntryVersionRestoreController;
 use App\Http\Controllers\ExportController;
 use App\Http\Controllers\HealthController;
+use App\Http\Controllers\LegalDocumentController;
 use App\Http\Controllers\PublicationMediaPreviewController;
 use App\Http\Controllers\PublicationPreviewController;
 use App\Http\Controllers\PublicationPrivacyReviewController;
@@ -38,10 +39,10 @@ use Illuminate\Support\Facades\Route;
 
 Route::middleware(SecurityHeaders::class)->group(function (): void {
     Route::view('/', 'welcome')->name('home');
-    Route::view('/privacy', 'public.privacy')
+    Route::get('/privacy', [LegalDocumentController::class, 'privacy'])
         ->middleware(NoIndex::class)
         ->name('privacy');
-    Route::view('/terms', 'public.terms')
+    Route::get('/terms', [LegalDocumentController::class, 'terms'])
         ->middleware(NoIndex::class)
         ->name('terms');
     Route::get('/health', HealthController::class)

@@ -10,7 +10,7 @@ This how-to guide targets operators deploying Memoria with PostgreSQL, Redis, pr
 - Redis 8 for cache, sessions, locks, and queues
 - at least one general worker and separately scalable `social`/`exports` workers
 - one scheduler invocation per minute or one `schedule:work` process
-- private S3-compatible storage for originals/exports and a distinct public-media boundary
+- private S3-compatible storage with distinct boundaries for originals, sanitized derivatives, and exports
 - ClamAV (or an equivalent future scanner adapter) with continuously updated signatures
 - transactional email provider
 - uptime/error/worker monitoring with privacy-safe scrubbing
@@ -30,14 +30,15 @@ Provide environment values through the platform's secret manager. Do not bake `.
 Required groups:
 
 - `APP_KEY`, canonical HTTPS `APP_URL`, locale/timezone, and `APP_DEBUG=false`
+- distinct `MEMORIA_PRIVACY_NOTICE_URL` and `MEMORIA_TERMS_OF_SERVICE_URL` values pointing to operator-reviewed public HTTPS documents
 - PostgreSQL credentials with TLS requirements
 - Redis connection and `CACHE_STORE=redis`, `SESSION_DRIVER=redis`, `QUEUE_CONNECTION=redis`
 - `SESSION_SECURE_COOKIE=true`, HTTP-only, SameSite policy, and an explicit comma-separated `TRUSTED_PROXIES` allowlist containing only platform-controlled proxy IPs/CIDRs
 - mail transport/from identity
-- private/public object storage credentials and bucket/endpoint values
+- private object storage credentials and distinct bucket/prefix values for originals, sanitized derivatives, and exports
 - `MEMORIA_ATTACHMENT_SCANNER=clamav`, an executable `MEMORIA_CLAMAV_BINARY`, and a bounded scan timeout
 - OAuth client IDs/secrets with exact production callback URLs
-- production social provider mode, version pins, credentials, callbacks, and approved scopes only for adapters actually enabled
+- `MEMORIA_SOCIAL_DRIVER=disabled`, or `real` with version pins, credentials, callbacks, and approved scopes only for adapters actually enabled
 - an infrastructure or application monitoring integration configured outside Memoria with body/header scrubbing; the application does not ship a vendor-specific DSN client
 
 Keep `APP_KEY` in a separately backed-up secret store. Losing it makes encrypted TOTP/OAuth values unreadable; exposing it compromises them.
@@ -76,30 +77,38 @@ Disconnecting an account cancels local pending/scheduled work and first writes e
 
 1. Back up and verify current database/media recovery points.
 2. Build, scan, and stage the immutable image.
-3. Put the application into maintenance mode only when a migration cannot be performed online.
-4. Run migrations once:
+3. Configure the release environment and run the fail-closed preflight inside the exact image that will receive traffic:
+
+   ```bash
+   php artisan memoria:release-check
+   ```
+
+   Do not continue while it reports a blocker. This validates canonical/legal URLs, secret shape, resolvable mail/log transports, an operational ClamAV signature database using an in-memory EICAR probe, physical storage boundaries, and PHP/runtime limits; it does not replace infrastructure connectivity checks, signature-freshness monitoring, a staging upload-path test, or legal review.
+
+4. Put the application into maintenance mode only when a migration cannot be performed online.
+5. Run migrations once:
 
    ```bash
    php artisan migrate --force
    ```
 
-   If `MEMORIA_PUBLIC_DISK=public`, create the public derivative symlink once with `php artisan storage:link`. Do not create a link for the private originals or export disks. S3-compatible public media does not need this local symlink.
+   Configure `MEMORIA_PRIVATE_DISK=memoria_private_s3`, `MEMORIA_SANITIZED_MEDIA_DISK=memoria_sanitized_s3`, and `MEMORIA_EXPORT_DISK=memoria_exports_s3` with private buckets or distinct private prefixes. Keep `MEMORIA_PUBLIC_DISK` physically separate from all three protected boundaries, not merely under a different Laravel disk name. In a multi-instance deployment, also set `LIVEWIRE_TEMPORARY_FILE_UPLOAD_DISK=memoria_private_s3`; configure that bucket's CORS to permit uploads only from the canonical application origin and configure a 24-hour lifecycle rule for `livewire-tmp/` (or run `php artisan livewire:configure-s3-upload-cleanup` once). Memoria streams approved derivatives through guarded controllers, so no public storage symlink is required.
 
-5. Warm safe caches in the release environment:
+6. Warm safe caches in the release environment:
 
    ```bash
    php artisan optimize
    php artisan filament:optimize
    ```
 
-6. Roll application instances, then restart queue workers so they load new code:
+7. Roll application instances, then restart queue workers so they load new code:
 
    ```bash
    php artisan queue:restart
    ```
 
-7. Verify `/up`, database/Redis/storage access, worker heartbeats, one fake/staging publication, and owner isolation.
-8. Exit maintenance mode if used.
+8. Verify `/up`, the `/privacy` and `/terms` redirects, database/Redis/storage access, worker heartbeats, one fake/staging publication, and owner isolation.
+9. Exit maintenance mode if used.
 
 ## Worker processes
 
@@ -115,7 +124,7 @@ Set `REDIS_QUEUE_RETRY_AFTER=960` (or a larger reviewed value) for this worker l
 
 Size worker memory/time limits for media/export archives. Alert on queue depth, oldest-job age, failed jobs, missing worker heartbeats, repeated provider authentication failures, and pending/failed `social_post_deletions`. The scheduler requeues stranded remote deletion requests every five minutes, but it does not replace a live `social` worker. Failed-job payload access is an administrative security capability; remote-deletion job payloads contain only the deletion-row ID, never a token or remote identifier.
 
-The image includes the ClamAV client, but operators must supply and refresh its signature database (or mount a managed signature volume). Verify a standard EICAR test fixture is rejected in staging before accepting uploads. If the scanner is missing or unhealthy, Memoria leaves files unavailable rather than treating them as clean.
+The image includes the ClamAV client, but intentionally does not bake a quickly stale signature database into the immutable application layer. Provision `/var/lib/clamav` from a continuously updated, read-only runtime volume (or an equivalent platform-managed signature source) before starting application and `security` worker containers. Run `freshclam` from a dedicated updater/init container with write access to that volume; the application containers need read access only. `memoria:release-check` rejects a missing or non-functional database by scanning an in-memory EICAR probe. Also verify an EICAR upload is rejected through the complete staging upload/queue path before accepting user files, and alert on stale signatures or update failures. If the scanner is missing or unhealthy, Memoria leaves files unavailable rather than treating them as clean.
 
 ## Scheduler
 
@@ -131,11 +140,13 @@ or a supervised process:
 php artisan schedule:work
 ```
 
-The scheduler releases due publications and reminders, and deletes expired export archives. Scheduled times are stored in UTC after interpreting the user's IANA timezone. Share-row, trash, public-media-orphan, and audit retention are operator-defined policies and are not silently purged by the application.
+The scheduler releases due publications and reminders, deletes expired export archives, and requeues stranded personal-file cleanup. A cleanup that exhausts its queue attempts is retried after `MEMORIA_FILE_CLEANUP_RETRY_HOURS` (24 hours by default), so a temporary storage outage cannot permanently strand deleted personal files. Alert on `storage.file_cleanup_failed` audit events and investigate recurring failures. Scheduled times are stored in UTC after interpreting the user's IANA timezone. Share-row, trash, public-media-orphan, and audit retention are operator-defined policies and are not silently purged by the application.
 
 ## Storage
 
-Private originals and exports require private ACLs and blocked anonymous access. Memoria streams them through authenticated, policy-checked application routes with private cache headers; do not expose their storage paths directly. Public publication media belongs in a distinct prefix/bucket with only intentionally copied derivatives.
+Private originals, sanitized derivatives, and exports require private ACLs and blocked anonymous access. Memoria streams them through policy-checked application routes with appropriate cache headers; do not expose their storage paths directly. Sanitized publication media belongs in a distinct prefix/bucket containing only intentionally copied derivatives.
+
+The bundled PHP profile accepts uploads up to 21 MB with a 25 MB request body. PHP and PHP-FPM do not impose a hard execution cutoff because authorized attachment and export streams may legitimately outlive a normal dynamic request; CLI workers use Laravel's per-worker and per-job timeouts. Configure reviewed connection, request-body (at least 25 MB), idle, and upstream timeouts at the TLS proxy or ingress, and test them against the largest supported download. Otherwise valid uploads or slow private downloads may be terminated outside Laravel.
 
 Configure lifecycle cleanup to complement—not replace—application reference checks. Test large uploads/downloads, MIME headers, range requests for media, public cache headers, authorization failures, and export expiry.
 

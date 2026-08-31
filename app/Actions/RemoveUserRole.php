@@ -24,6 +24,11 @@ class RemoveUserRole
         Gate::forUser($actor)->authorize('manageRoles', $subject);
 
         return DB::transaction(function () use ($actor, $request, $roleName, $subject): bool {
+            $role = Role::query()
+                ->where('name', $roleName->value)
+                ->lockForUpdate()
+                ->firstOrFail();
+
             $users = User::query()
                 ->whereKey([$actor->getKey(), $subject->getKey()])
                 ->orderBy('id')
@@ -37,11 +42,6 @@ class RemoveUserRole
             $lockedSubject = $users->get($subject->getKey());
 
             Gate::forUser($lockedActor)->authorize('manageRoles', $lockedSubject);
-
-            $role = Role::query()
-                ->where('name', $roleName->value)
-                ->lockForUpdate()
-                ->firstOrFail();
 
             if (! $lockedSubject->roles()->whereKey($role->getKey())->exists()) {
                 return false;

@@ -18,6 +18,7 @@ use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\Relations\HasOne;
 use Illuminate\Foundation\Auth\User as Authenticatable;
 use Illuminate\Notifications\Notifiable;
+use Illuminate\Support\Facades\DB;
 use LogicException;
 
 class User extends Authenticatable implements FilamentUser, HasAppAuthentication, HasAppAuthenticationRecovery, MustVerifyEmail
@@ -45,6 +46,19 @@ class User extends Authenticatable implements FilamentUser, HasAppAuthentication
     protected static function booted(): void
     {
         static::deleting(function (User $user): void {
+            if (! $user->isSuperAdministrator()) {
+                return;
+            }
+
+            if (DB::transactionLevel() === 0) {
+                throw new LogicException('Super administrator accounts must be deleted within a protected transaction.');
+            }
+
+            Role::query()
+                ->where('name', RoleName::SuperAdministrator->value)
+                ->lockForUpdate()
+                ->first();
+
             if ($user->isLastSuperAdministrator()) {
                 throw new LogicException('The last super administrator cannot be deleted.');
             }
@@ -211,7 +225,11 @@ class User extends Authenticatable implements FilamentUser, HasAppAuthentication
 
     public function isLastSuperAdministrator(): bool
     {
-        if (! $this->exists || $this->disabled_at !== null || ! $this->isSuperAdministrator()) {
+        if (! $this->exists || ! $this->isSuperAdministrator()) {
+            return false;
+        }
+
+        if (! User::query()->whereKey($this->getKey())->whereNull('disabled_at')->exists()) {
             return false;
         }
 
@@ -249,11 +267,22 @@ class User extends Authenticatable implements FilamentUser, HasAppAuthentication
 
     public function disable(): void
     {
-        if ($this->isLastSuperAdministrator()) {
-            throw new LogicException('The last super administrator cannot be disabled.');
-        }
+        DB::transaction(function (): void {
+            Role::query()
+                ->where('name', RoleName::SuperAdministrator->value)
+                ->lockForUpdate()
+                ->first();
 
-        $this->forceFill(['disabled_at' => now()])->save();
+            $user = User::query()->lockForUpdate()->findOrFail($this->getKey());
+
+            if ($user->isLastSuperAdministrator()) {
+                throw new LogicException('The last super administrator cannot be disabled.');
+            }
+
+            $user->forceFill(['disabled_at' => now()])->save();
+        });
+
+        $this->refresh();
     }
 
     protected function resolveRole(Role|RoleName|string $role): Role

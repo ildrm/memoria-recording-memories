@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Enums\AttachmentScanStatus;
 use App\Models\Attachment;
 use App\Models\Comment;
 use App\Models\Entry;
@@ -11,6 +12,7 @@ use App\Models\Export;
 use App\Models\Journal;
 use App\Models\Person;
 use App\Models\Publication;
+use App\Models\PublicationMedia;
 use App\Models\PublicationTarget;
 use App\Models\PublicationVersion;
 use App\Models\Reaction;
@@ -32,7 +34,10 @@ use ZipArchive;
 
 class UserExportArchiveBuilder
 {
-    public function __construct(private readonly Filesystem $files) {}
+    public function __construct(
+        private readonly Filesystem $files,
+        private readonly StoredFileCleanup $storedFileCleanup,
+    ) {}
 
     /**
      * @return array{disk: string, path: string, filename: string, size: int}
@@ -49,16 +54,36 @@ class UserExportArchiveBuilder
 
         /** @var array<int, string> $temporaryFiles */
         $temporaryFiles = [];
+        /** @var array{disk: string, path: string}|null $storedArchive */
+        $storedArchive = null;
+        $archiveStream = null;
         $zip = new ZipArchive;
+        $archiveIsOpen = false;
 
         try {
             if ($zip->open($temporaryArchive, ZipArchive::CREATE | ZipArchive::OVERWRITE) !== true) {
                 throw new RuntimeException('Unable to create export archive.');
             }
+            $archiveIsOpen = true;
 
             $options = $export->options ?? [];
             $formats = array_intersect((array) ($options['formats'] ?? ['json', 'markdown']), ['json', 'markdown']);
             $includeAttachments = (bool) ($options['include_attachments'] ?? true);
+            $fileCounts = $includeAttachments
+                ? [
+                    'attachments' => $this->addAttachments($zip, $owner, $workingDirectory, $temporaryFiles),
+                    'publication_media_files' => $this->addPublicationMediaFiles($zip, $owner, $workingDirectory, $temporaryFiles),
+                    'profile_images' => $this->addProfileImages($zip, $owner, $workingDirectory, $temporaryFiles),
+                    'journal_images' => $this->addJournalImages($zip, $owner, $workingDirectory, $temporaryFiles),
+                    'person_images' => $this->addPersonImages($zip, $owner, $workingDirectory, $temporaryFiles),
+                ]
+                : [
+                    'attachments' => 0,
+                    'publication_media_files' => 0,
+                    'profile_images' => 0,
+                    'journal_images' => 0,
+                    'person_images' => 0,
+                ];
 
             $counts = [
                 'journals' => $this->addJournals($zip, $owner, $workingDirectory, $temporaryFiles),
@@ -67,28 +92,34 @@ class UserExportArchiveBuilder
                 'tags' => $this->addTags($zip, $owner, $workingDirectory, $temporaryFiles),
                 'people' => $this->addPeople($zip, $owner, $workingDirectory, $temporaryFiles),
                 'publications' => $this->addPublications($zip, $owner),
+                'attachment_records' => $this->addAttachmentMetadata($zip, $owner, $workingDirectory, $temporaryFiles),
+                'publication_media_records' => $this->addPublicationMediaMetadata($zip, $owner, $workingDirectory, $temporaryFiles),
                 'publication_versions' => $this->addPublicationVersions($zip, $owner, $workingDirectory, $temporaryFiles),
                 'shares' => $this->addShares($zip, $owner, $workingDirectory, $temporaryFiles),
                 'reminders' => $this->addReminders($zip, $owner, $workingDirectory, $temporaryFiles),
                 'community' => $this->addCommunityActivity($zip, $owner, $workingDirectory, $temporaryFiles),
                 'social' => $this->addSocialMetadata($zip, $owner, $workingDirectory, $temporaryFiles),
-                'attachments' => $includeAttachments
-                    ? $this->addAttachments($zip, $owner, $workingDirectory, $temporaryFiles)
-                    : 0,
+                ...$fileCounts,
             ];
 
             $owner->loadMissing(['profile', 'preferences']);
-            $zip->addFromString('metadata/account.json', $this->json([
+            $this->addString($zip, 'metadata/account.json', $this->json([
                 'id' => $owner->getKey(),
                 'name' => $owner->name,
                 'email' => $owner->email,
-                'profile' => $owner->profile?->only([
-                    'username',
-                    'display_name',
-                    'biography',
-                    'website_url',
-                    'is_public',
-                ]),
+                'profile' => $owner->profile === null ? null : array_merge(
+                    $owner->profile->only([
+                        'username',
+                        'display_name',
+                        'biography',
+                        'website_url',
+                        'is_public',
+                    ]),
+                    [
+                        'has_avatar' => filled($owner->profile->avatar_path),
+                        'has_cover_image' => filled($owner->profile->cover_image_path),
+                    ],
+                ),
                 'preferences' => $owner->preferences?->only([
                     'locale',
                     'timezone',
@@ -98,49 +129,103 @@ class UserExportArchiveBuilder
                     'privacy_preferences',
                 ]),
             ]));
-            $zip->addFromString('manifest.json', $this->json([
-                'schema' => 'memoria-export-v1',
+            $this->addString($zip, 'manifest.json', $this->json([
+                'schema' => 'memoria-export-v2',
                 'exported_at' => now()->toIso8601String(),
                 'formats' => array_values($formats),
                 'includes_original_attachments' => $includeAttachments,
+                'includes_sanitized_public_media' => $includeAttachments,
+                'includes_profile_and_collection_images' => $includeAttachments,
                 'counts' => $counts,
             ]));
-            $zip->close();
+            if (! $zip->close()) {
+                throw new RuntimeException('Unable to finalize export archive.');
+            }
+            $archiveIsOpen = false;
 
             $disk = (string) config('memoria.disks.exports', 'local');
             $directory = trim((string) config('memoria.exports.directory', 'exports'), '/');
             $filename = 'memoria-export-'.now()->format('Y-m-d').'-'.Str::lower(Str::random(8)).'.zip';
             $path = $directory.'/'.$owner->getKey().'/'.$export->getKey().'/'.$filename;
-            $stream = fopen($temporaryArchive, 'rb');
+            $expectedArchiveSize = filesize($temporaryArchive);
+            if (! is_int($expectedArchiveSize) || $expectedArchiveSize < 1) {
+                throw new RuntimeException('Unable to verify export archive.');
+            }
 
-            if ($stream === false || ! Storage::disk($disk)->writeStream($path, $stream)) {
-                if (is_resource($stream)) {
-                    fclose($stream);
-                }
+            $storedArchive = ['disk' => $disk, 'path' => $path];
+            $archiveStream = fopen($temporaryArchive, 'rb');
 
+            if ($archiveStream === false || ! Storage::disk($disk)->writeStream($path, $archiveStream)) {
                 throw new RuntimeException('Unable to store export archive.');
             }
 
-            fclose($stream);
+            fclose($archiveStream);
+            $archiveStream = null;
+            $storedArchiveSize = (int) Storage::disk($disk)->size($path);
+            if ($storedArchiveSize !== $expectedArchiveSize) {
+                throw new RuntimeException('The stored export archive failed verification.');
+            }
 
             return [
                 'disk' => $disk,
                 'path' => $path,
                 'filename' => $filename,
-                'size' => (int) Storage::disk($disk)->size($path),
+                'size' => $storedArchiveSize,
             ];
         } catch (Throwable $exception) {
-            if ($zip->status === ZipArchive::ER_OK) {
+            if ($archiveIsOpen) {
                 $zip->close();
+            }
+
+            if ($storedArchive !== null) {
+                $this->removeFailedStoredArchive($storedArchive, $exception);
             }
 
             throw $exception;
         } finally {
+            if (is_resource($archiveStream)) {
+                fclose($archiveStream);
+            }
+
             foreach ($temporaryFiles as $temporaryPath) {
                 $this->files->delete($temporaryPath);
             }
 
             $this->files->delete($temporaryArchive);
+        }
+    }
+
+    /**
+     * @param  array{disk: string, path: string}  $storedArchive
+     */
+    private function removeFailedStoredArchive(array $storedArchive, Throwable $exportException): void
+    {
+        $deletionScheduled = false;
+        $deleted = false;
+
+        try {
+            $this->storedFileCleanup->schedule(
+                $storedArchive['disk'],
+                $storedArchive['path'],
+                'failed_user_export_archive',
+                dispatchImmediately: false,
+            );
+            $deletionScheduled = true;
+        } catch (Throwable $cleanupException) {
+            report($cleanupException);
+        }
+
+        try {
+            $deleted = Storage::disk($storedArchive['disk'])->delete($storedArchive['path']);
+        } catch (Throwable $cleanupException) {
+            report($cleanupException);
+        }
+
+        if (! $deletionScheduled && ! $deleted) {
+            throw new RuntimeException(
+                'A failed export archive could not be removed or scheduled for removal.',
+                previous: $exportException,
+            );
         }
     }
 
@@ -150,15 +235,17 @@ class UserExportArchiveBuilder
         User $owner,
         string $workingDirectory,
         array &$temporaryFiles,
-    ): int
-    {
+    ): int {
         $journals = Journal::withTrashed()
             ->ownedBy($owner)
             ->lazyById($this->chunkSize(), 'id')
-            ->map(fn (Journal $journal): array => $journal->only([
-                'id', 'name', 'slug', 'description', 'icon', 'sort_order', 'archived_at',
-                'created_at', 'updated_at', 'deleted_at',
-            ]));
+            ->map(fn (Journal $journal): array => array_merge(
+                $journal->only([
+                    'id', 'name', 'slug', 'description', 'icon', 'sort_order', 'archived_at',
+                    'created_at', 'updated_at', 'deleted_at',
+                ]),
+                ['has_cover_image' => filled($journal->cover_path)],
+            ));
 
         return $this->addJsonArrayFile(
             $zip,
@@ -197,11 +284,12 @@ class UserExportArchiveBuilder
                         ]);
 
                         if (in_array('json', $formats, true)) {
-                            $zip->addFromString("entries/{$entry->getKey()}.json", $this->json($payload));
+                            $this->addString($zip, "entries/{$entry->getKey()}.json", $this->json($payload));
                         }
 
                         if (in_array('markdown', $formats, true)) {
-                            $zip->addFromString(
+                            $this->addString(
+                                $zip,
                                 "entries/{$entry->getKey()}.md",
                                 '# '.($entry->title ?: __('Untitled memory'))."\n\n".(string) $entry->body,
                             );
@@ -225,10 +313,12 @@ class UserExportArchiveBuilder
             ->orderBy('id')
             ->chunkById($this->chunkSize(), function ($publications) use ($zip, &$count): void {
                 foreach ($publications as $publication) {
-                    $zip->addFromString(
+                    $this->addString(
+                        $zip,
                         "publications/{$publication->getKey()}.json",
                         $this->json($publication->only([
                             'id', 'source_entry_id', 'title', 'slug', 'excerpt', 'body',
+                            'topics',
                             'status', 'comments_enabled', 'reactions_enabled',
                             'search_engine_indexing', 'scheduled_at', 'published_at',
                             'unpublished_at', 'archived_at', 'revision', 'created_at',
@@ -243,13 +333,74 @@ class UserExportArchiveBuilder
     }
 
     /** @param array<int, string> $temporaryFiles */
+    private function addAttachmentMetadata(
+        ZipArchive $zip,
+        User $owner,
+        string $workingDirectory,
+        array &$temporaryFiles,
+    ): int {
+        $attachments = Attachment::withTrashed()
+            ->ownedBy($owner)
+            ->lazyById($this->chunkSize(), 'id')
+            ->map(fn (Attachment $attachment): array => $attachment->only([
+                'id', 'entry_id', 'original_name', 'download_name', 'mime_type',
+                'extension', 'size_bytes', 'media_type', 'sha256', 'scan_status',
+                'scanned_at', 'metadata', 'created_at', 'updated_at', 'deleted_at',
+            ]));
+
+        return $this->addJsonArrayFile(
+            $zip,
+            'metadata/attachments.json',
+            $workingDirectory,
+            $temporaryFiles,
+            $attachments,
+        );
+    }
+
+    /** @param array<int, string> $temporaryFiles */
+    private function addPublicationMediaMetadata(
+        ZipArchive $zip,
+        User $owner,
+        string $workingDirectory,
+        array &$temporaryFiles,
+    ): int {
+        $media = PublicationMedia::query()
+            ->ownedBy($owner)
+            ->lazyById($this->chunkSize(), 'id')
+            ->map(fn (PublicationMedia $medium): array => [
+                ...$medium->only([
+                    'id', 'publication_id', 'source_attachment_id', 'original_name',
+                    'mime_type', 'size_bytes', 'alt_text', 'sort_order', 'is_featured',
+                    'metadata_stripped', 'created_at', 'updated_at',
+                ]),
+                'image' => [
+                    'width' => (int) data_get($medium->metadata, 'width', 0),
+                    'height' => (int) data_get($medium->metadata, 'height', 0),
+                    'variants' => collect($medium->responsiveImageVariants())
+                        ->map(fn (array $variant): array => Arr::only($variant, [
+                            'name', 'mime_type', 'size_bytes', 'width', 'height',
+                        ]))
+                        ->values()
+                        ->all(),
+                ],
+            ]);
+
+        return $this->addJsonArrayFile(
+            $zip,
+            'metadata/publication-media.json',
+            $workingDirectory,
+            $temporaryFiles,
+            $media,
+        );
+    }
+
+    /** @param array<int, string> $temporaryFiles */
     private function addEntryVersions(
         ZipArchive $zip,
         User $owner,
         string $workingDirectory,
         array &$temporaryFiles,
-    ): int
-    {
+    ): int {
         $versions = EntryVersion::query()
             ->ownedBy($owner)
             ->lazyById($this->chunkSize(), 'id')
@@ -274,8 +425,7 @@ class UserExportArchiveBuilder
         User $owner,
         string $workingDirectory,
         array &$temporaryFiles,
-    ): int
-    {
+    ): int {
         $versions = PublicationVersion::query()
             ->ownedBy($owner)
             ->lazyById($this->chunkSize(), 'id')
@@ -299,8 +449,7 @@ class UserExportArchiveBuilder
         User $owner,
         string $workingDirectory,
         array &$temporaryFiles,
-    ): int
-    {
+    ): int {
         $tags = Tag::query()
             ->ownedBy($owner)
             ->lazyById($this->chunkSize(), 'id')
@@ -323,15 +472,17 @@ class UserExportArchiveBuilder
         User $owner,
         string $workingDirectory,
         array &$temporaryFiles,
-    ): int
-    {
+    ): int {
         $people = Person::withTrashed()
             ->ownedBy($owner)
             ->lazyById($this->chunkSize(), 'id')
-            ->map(fn (Person $person): array => $person->only([
-                'id', 'display_name', 'nickname', 'notes', 'relationship',
-                'created_at', 'updated_at', 'deleted_at',
-            ]));
+            ->map(fn (Person $person): array => array_merge(
+                $person->only([
+                    'id', 'display_name', 'nickname', 'notes', 'relationship',
+                    'created_at', 'updated_at', 'deleted_at',
+                ]),
+                ['has_avatar' => filled($person->avatar_path)],
+            ));
 
         return $this->addJsonArrayFile(
             $zip,
@@ -684,8 +835,9 @@ class UserExportArchiveBuilder
     ): int {
         $count = 0;
 
-        Attachment::withTrashed()
+        Attachment::query()
             ->ownedBy($owner)
+            ->where('scan_status', AttachmentScanStatus::Clean)
             ->orderBy('id')
             ->chunkById($this->chunkSize(), function ($attachments) use (
                 $zip,
@@ -694,43 +846,295 @@ class UserExportArchiveBuilder
                 &$count,
             ): void {
                 foreach ($attachments as $attachment) {
-                    $source = Storage::disk($attachment->disk)->readStream($attachment->path);
-                    if (! is_resource($source)) {
-                        continue;
-                    }
-
-                    $temporaryPath = tempnam($workingDirectory, 'media-');
-                    if ($temporaryPath === false) {
-                        fclose($source);
-
-                        throw new RuntimeException('Unable to allocate media export workspace.');
-                    }
-
-                    $destination = fopen($temporaryPath, 'wb');
-                    if ($destination === false) {
-                        fclose($source);
-
-                        throw new RuntimeException('Unable to write media export workspace.');
-                    }
-
-                    stream_copy_to_stream($source, $destination);
-                    fclose($source);
-                    fclose($destination);
-                    $temporaryFiles[] = $temporaryPath;
-
                     $safeName = Str::slug(pathinfo($attachment->original_name, PATHINFO_FILENAME)) ?: 'attachment';
-                    $extension = preg_replace('/[^a-z0-9]/i', '', (string) $attachment->extension);
+                    $extension = $this->safeExtension(
+                        (string) $attachment->path,
+                        (string) $attachment->mime_type,
+                        (string) $attachment->extension,
+                    );
                     $archiveName = "media/{$attachment->entry_id}/{$attachment->getKey()}-{$safeName}";
                     if ($extension !== '') {
                         $archiveName .= '.'.Str::lower($extension);
                     }
 
-                    $zip->addFile($temporaryPath, $archiveName);
+                    $this->addStoredFile(
+                        zip: $zip,
+                        disk: (string) $attachment->disk,
+                        path: (string) $attachment->path,
+                        archiveName: $archiveName,
+                        workingDirectory: $workingDirectory,
+                        temporaryFiles: $temporaryFiles,
+                        expectedSize: (int) $attachment->size_bytes,
+                        expectedSha256: (string) $attachment->sha256,
+                    );
                     $count++;
                 }
             }, 'id');
 
         return $count;
+    }
+
+    /** @param array<int, string> $temporaryFiles */
+    private function addPublicationMediaFiles(
+        ZipArchive $zip,
+        User $owner,
+        string $workingDirectory,
+        array &$temporaryFiles,
+    ): int {
+        $count = 0;
+
+        PublicationMedia::query()
+            ->ownedBy($owner)
+            ->orderBy('id')
+            ->chunkById($this->chunkSize(), function ($media) use (
+                $zip,
+                $workingDirectory,
+                &$temporaryFiles,
+                &$count,
+            ): void {
+                foreach ($media as $medium) {
+                    $variantsByPath = collect($medium->responsiveImageVariants())->keyBy('path');
+
+                    foreach ($medium->storedImageFiles() as $fileIndex => $file) {
+                        $variant = $variantsByPath->get($file['path']);
+                        $variantName = is_array($variant)
+                            ? (string) $variant['name']
+                            : ($file['path'] === $medium->path ? 'original' : 'variant-'.$fileIndex);
+                        $mimeType = is_array($variant)
+                            ? (string) $variant['mime_type']
+                            : (string) $medium->mime_type;
+                        $expectedSize = is_array($variant)
+                            ? (int) $variant['size_bytes']
+                            : ($file['path'] === $medium->path ? (int) $medium->size_bytes : null);
+                        $extension = $this->safeExtension($file['path'], $mimeType);
+                        $safeVariantName = preg_replace('/[^a-z0-9-]/i', '', $variantName) ?: 'image';
+                        $archiveName = "media/publications/{$medium->publication_id}/{$medium->getKey()}-{$safeVariantName}";
+                        if ($extension !== '') {
+                            $archiveName .= '.'.$extension;
+                        }
+
+                        $this->addStoredFile(
+                            zip: $zip,
+                            disk: $file['disk'],
+                            path: $file['path'],
+                            archiveName: $archiveName,
+                            workingDirectory: $workingDirectory,
+                            temporaryFiles: $temporaryFiles,
+                            expectedSize: $expectedSize,
+                        );
+                        $count++;
+                    }
+                }
+            }, 'id');
+
+        return $count;
+    }
+
+    /** @param array<int, string> $temporaryFiles */
+    private function addProfileImages(
+        ZipArchive $zip,
+        User $owner,
+        string $workingDirectory,
+        array &$temporaryFiles,
+    ): int {
+        $owner->loadMissing('profile');
+        $profile = $owner->profile;
+        if ($profile === null) {
+            return 0;
+        }
+
+        $count = 0;
+        foreach ([
+            'avatar' => [$profile->avatar_path, $profile->avatar_disk],
+            'cover' => [$profile->cover_image_path, $profile->cover_image_disk],
+        ] as $kind => [$path, $disk]) {
+            if (! is_string($path) || $path === '') {
+                continue;
+            }
+
+            $extension = $this->safeExtension($path);
+            $this->addStoredFile(
+                zip: $zip,
+                disk: is_string($disk) && $disk !== ''
+                    ? $disk
+                    : (string) config('memoria.disks.sanitized_media', 'local'),
+                path: $path,
+                archiveName: "media/profile/{$kind}".($extension === '' ? '' : '.'.$extension),
+                workingDirectory: $workingDirectory,
+                temporaryFiles: $temporaryFiles,
+            );
+            $count++;
+        }
+
+        return $count;
+    }
+
+    /** @param array<int, string> $temporaryFiles */
+    private function addJournalImages(
+        ZipArchive $zip,
+        User $owner,
+        string $workingDirectory,
+        array &$temporaryFiles,
+    ): int {
+        $count = 0;
+
+        Journal::query()
+            ->ownedBy($owner)
+            ->whereNotNull('cover_path')
+            ->orderBy('id')
+            ->chunkById($this->chunkSize(), function ($journals) use (
+                $zip,
+                $workingDirectory,
+                &$temporaryFiles,
+                &$count,
+            ): void {
+                foreach ($journals as $journal) {
+                    $path = (string) $journal->cover_path;
+                    $extension = $this->safeExtension($path);
+                    $this->addStoredFile(
+                        zip: $zip,
+                        disk: (string) config('memoria.disks.private', 'local'),
+                        path: $path,
+                        archiveName: "media/journals/{$journal->getKey()}-cover".($extension === '' ? '' : '.'.$extension),
+                        workingDirectory: $workingDirectory,
+                        temporaryFiles: $temporaryFiles,
+                    );
+                    $count++;
+                }
+            }, 'id');
+
+        return $count;
+    }
+
+    /** @param array<int, string> $temporaryFiles */
+    private function addPersonImages(
+        ZipArchive $zip,
+        User $owner,
+        string $workingDirectory,
+        array &$temporaryFiles,
+    ): int {
+        $count = 0;
+
+        Person::query()
+            ->ownedBy($owner)
+            ->whereNotNull('avatar_path')
+            ->orderBy('id')
+            ->chunkById($this->chunkSize(), function ($people) use (
+                $zip,
+                $workingDirectory,
+                &$temporaryFiles,
+                &$count,
+            ): void {
+                foreach ($people as $person) {
+                    $path = (string) $person->avatar_path;
+                    $extension = $this->safeExtension($path);
+                    $this->addStoredFile(
+                        zip: $zip,
+                        disk: (string) config('memoria.disks.private', 'local'),
+                        path: $path,
+                        archiveName: "media/people/{$person->getKey()}-avatar".($extension === '' ? '' : '.'.$extension),
+                        workingDirectory: $workingDirectory,
+                        temporaryFiles: $temporaryFiles,
+                    );
+                    $count++;
+                }
+            }, 'id');
+
+        return $count;
+    }
+
+    /** @param array<int, string> $temporaryFiles */
+    private function addStoredFile(
+        ZipArchive $zip,
+        string $disk,
+        string $path,
+        string $archiveName,
+        string $workingDirectory,
+        array &$temporaryFiles,
+        ?int $expectedSize = null,
+        ?string $expectedSha256 = null,
+    ): void {
+        if ($disk === '' || ! $this->storedPathIsSafe($path)) {
+            throw new RuntimeException('An export media record has an invalid storage target.');
+        }
+
+        try {
+            $source = Storage::disk($disk)->readStream($path);
+        } catch (Throwable) {
+            throw new RuntimeException('An expected export media object could not be read.');
+        }
+
+        if (! is_resource($source)) {
+            throw new RuntimeException('An expected export media object is missing.');
+        }
+
+        $temporaryPath = $this->temporaryFile($workingDirectory, $temporaryFiles, 'media-');
+        $destination = fopen($temporaryPath, 'wb');
+        if ($destination === false) {
+            fclose($source);
+
+            throw new RuntimeException('Unable to write media export workspace.');
+        }
+
+        try {
+            $copiedBytes = stream_copy_to_stream($source, $destination);
+        } finally {
+            fclose($source);
+            fclose($destination);
+        }
+
+        if (! is_int($copiedBytes)
+            || ($expectedSize !== null && $expectedSize > 0 && $copiedBytes !== $expectedSize)) {
+            throw new RuntimeException('An export media object failed size verification.');
+        }
+
+        if (is_string($expectedSha256) && $expectedSha256 !== '') {
+            $actualSha256 = hash_file('sha256', $temporaryPath);
+            if (! is_string($actualSha256) || ! hash_equals($expectedSha256, $actualSha256)) {
+                throw new RuntimeException('An export media object failed integrity verification.');
+            }
+        }
+
+        if (! $zip->addFile($temporaryPath, $archiveName)) {
+            throw new RuntimeException('Unable to add media to the export archive.');
+        }
+    }
+
+    private function safeExtension(string $path, ?string $mimeType = null, ?string $preferred = null): string
+    {
+        $mimeExtension = match ($mimeType) {
+            'image/jpeg' => 'jpg',
+            'image/png' => 'png',
+            'image/webp' => 'webp',
+            'image/gif' => 'gif',
+            'application/pdf' => 'pdf',
+            'text/plain' => 'txt',
+            'text/markdown' => 'md',
+            'audio/mpeg' => 'mp3',
+            'audio/mp4' => 'm4a',
+            'audio/wav', 'audio/x-wav' => 'wav',
+            'video/mp4' => 'mp4',
+            'video/quicktime' => 'mov',
+            default => null,
+        };
+        $candidate = $mimeExtension ?? $preferred ?? pathinfo($path, PATHINFO_EXTENSION);
+
+        return Str::lower(preg_replace('/[^a-z0-9]/i', '', (string) $candidate) ?? '');
+    }
+
+    private function storedPathIsSafe(string $path): bool
+    {
+        return $path !== ''
+            && ! str_starts_with($path, '/')
+            && ! str_contains($path, '..')
+            && ! str_contains($path, "\0");
+    }
+
+    private function addString(ZipArchive $zip, string $archivePath, string $contents): void
+    {
+        if (! $zip->addFromString($archivePath, $contents)) {
+            throw new RuntimeException('Unable to add export content to the archive.');
+        }
     }
 
     private function json(mixed $value): string

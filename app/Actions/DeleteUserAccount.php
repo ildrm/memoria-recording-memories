@@ -3,6 +3,7 @@
 namespace App\Actions;
 
 use App\Enums\PublicationTargetStatus;
+use App\Enums\RoleName;
 use App\Enums\SocialPostStatus;
 use App\Events\AccountDeleted;
 use App\Jobs\DispatchPendingRemoteSocialPostDeletions;
@@ -16,6 +17,7 @@ use App\Models\Person;
 use App\Models\Publication;
 use App\Models\PublicationMedia;
 use App\Models\Report;
+use App\Models\Role;
 use App\Models\SocialPost;
 use App\Models\User;
 use App\Models\UserProfile;
@@ -40,6 +42,11 @@ class DeleteUserAccount
         $formerUserId = (int) $user->getKey();
 
         DB::transaction(function () use ($user, $formerUserId): void {
+            Role::query()
+                ->where('name', RoleName::SuperAdministrator->value)
+                ->lockForUpdate()
+                ->first();
+
             $user = User::query()->lockForUpdate()->findOrFail($user->getKey());
             $email = $user->email;
             $user->forceFill(['account_deletion_requested_at' => now()])->save();

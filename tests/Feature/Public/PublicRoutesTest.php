@@ -7,9 +7,16 @@ use App\Models\Publication;
 use App\Models\PublicationMedia;
 use App\Models\PublicationTarget;
 use App\Models\User;
+use Illuminate\Http\Middleware\TrustHosts;
+use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\RateLimiter;
 use Illuminate\Support\Facades\Storage;
+use Symfony\Component\HttpFoundation\Exception\SuspiciousOperationException;
+
+afterEach(function (): void {
+    Request::setTrustedHosts([]);
+});
 
 test('public profiles and feeds contain published snapshots but never drafts', function (): void {
     $owner = User::factory()->create();
@@ -188,6 +195,44 @@ test('public health and baseline headers reveal no operational details', functio
         ->assertDontSee('Laravel')
         ->assertDontSee('database')
         ->assertDontSee('queue');
+});
+
+test('production rejects non-canonical hosts before they can poison the sitemap cache', function (): void {
+    $canonicalHost = 'memoria.example.test';
+    $cacheKey = 'memoria:sitemap:v4:static';
+
+    config(['app.url' => "https://{$canonicalHost}"]);
+    app()->detectEnvironment(fn (): string => 'production');
+    Request::setTrustedHosts(array_filter(app(TrustHosts::class)->hosts()));
+
+    try {
+        Cache::forget($cacheKey);
+
+        foreach (['attacker.example.test', "notes.{$canonicalHost}"] as $untrustedHost) {
+            try {
+                $this->withHeader('Host', $untrustedHost)
+                    ->get('/sitemaps/static.xml')
+                    ->assertBadRequest();
+            } catch (SuspiciousOperationException $exception) {
+                expect($exception->getMessage())->toContain('Untrusted Host');
+            }
+
+            expect(Cache::has($cacheKey))->toBeFalse();
+        }
+
+        $this->withHeader('Host', $canonicalHost)
+            ->get('/sitemaps/static.xml')
+            ->assertOk()
+            ->assertSee($canonicalHost, false)
+            ->assertDontSee('attacker.example.test', false);
+
+        expect(Cache::get($cacheKey))
+            ->toBeString()
+            ->toContain($canonicalHost)
+            ->not->toContain('attacker.example.test');
+    } finally {
+        Request::setTrustedHosts([]);
+    }
 });
 
 test('forwarded https is honored only from an explicitly trusted reverse proxy', function (): void {

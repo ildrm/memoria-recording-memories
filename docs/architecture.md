@@ -84,9 +84,9 @@ Adapter behavior follows the provider contracts: [X post creation](https://docs.
 ## Storage boundary
 
 - Private originals live on `MEMORIA_PRIVATE_DISK`, normally local private storage in development and a private S3-compatible bucket in production.
-- Publication media is copied/re-encoded to `MEMORIA_PUBLIC_DISK` only after explicit selection.
+- Publication media is copied/re-encoded to the private, non-web-linked `MEMORIA_SANITIZED_MEDIA_DISK` only after explicit selection.
 - Public records store public-copy paths, never private original paths or URLs.
-- Private downloads pass through owner/share authorization on application routes and return `no-store` responses.
+- Private downloads pass through owner/share authorization on application routes and return `no-store` responses. Approved publication/profile derivatives also pass through guarded public controllers, so no storage symlink is required.
 - Export archives use private storage, expire, and are deleted by scheduled cleanup.
 
 Uploads enter a `Pending` state and a unique after-commit job invokes the attachment-scanner contract. Local/testing may use the deterministic fake scanner; production is fail-closed unless `MEMORIA_ATTACHMENT_SCANNER=clamav` is configured with a working, regularly updated `clamscan` binary. Clean, rejected, and infrastructure-failed outcomes are persisted, and every download path requires `Clean`.

@@ -35,7 +35,6 @@ cp .env.example .env
 php artisan key:generate
 touch database/database.sqlite
 php artisan migrate:fresh --seed
-php artisan storage:link
 npm ci
 npm run build
 php artisan serve
@@ -60,7 +59,6 @@ docker compose build
 docker compose up -d postgres redis
 docker compose run --rm app php artisan key:generate
 docker compose run --rm app php artisan migrate:fresh --seed
-docker compose run --rm app php artisan storage:link
 docker compose up app worker scheduler node
 ```
 
@@ -116,14 +114,17 @@ npm run build
 Copy `.env.example`; never commit `.env`. Important production values include:
 
 - `APP_KEY` — encrypts TOTP and OAuth credentials; protect and back it up separately.
+- `MEMORIA_PRIVACY_NOTICE_URL` and `MEMORIA_TERMS_OF_SERVICE_URL` — distinct, operator-reviewed public HTTPS documents. Production refuses to serve the bundled drafting templates.
 - PostgreSQL `DB_*` and Redis `REDIS_*` settings.
-- `MEMORIA_PRIVATE_DISK`, `MEMORIA_SANITIZED_MEDIA_DISK`, `MEMORIA_PUBLIC_DISK`, and `MEMORIA_EXPORT_DISK` — originals, guarded sanitized derivatives, intentionally direct-public assets, and exports must use explicit visibility boundaries. The sanitized-media disk must never be web-linked.
-- `MEMORIA_ATTACHMENT_SCANNER=clamav` plus a maintained `clamscan` installation in production; scanner failure remains fail-closed. Every worker topology must consume the `security` queue so pending uploads are actually scanned.
+- `MEMORIA_PRIVATE_DISK`, `MEMORIA_SANITIZED_MEDIA_DISK`, and `MEMORIA_EXPORT_DISK` — originals, guarded sanitized derivatives, and exports must use private visibility boundaries. `MEMORIA_PUBLIC_DISK` identifies a directly public disk that the sanitizer explicitly refuses; current public media is always streamed through guarded application routes.
+- `MEMORIA_ATTACHMENT_SCANNER=clamav` plus a maintained signature database mounted for `clamscan` in production; the release check proves EICAR detection, and scanner failure remains fail-closed. Every worker topology must consume the `security` queue so pending uploads are actually scanned.
 - OAuth client IDs, secrets, exact callbacks, and provider-approved scopes. Memoria never asks for a provider password or accepts one as a substitute for OAuth.
-- `MEMORIA_SOCIAL_DRIVER=fake` is local/testing-only. Set `MEMORIA_SOCIAL_DRIVER=real` in production only after staging the enabled adapters, workers, app review, version pins, and reconnect runbook.
+- `MEMORIA_SOCIAL_DRIVER=fake` is local/testing-only. Production must explicitly use `disabled`, or `real` only after staging the enabled adapters, workers, app review, version pins, and reconnect runbook.
 - `MEMORIA_LINKEDIN_VERSION` and `MEMORIA_FACEBOOK_GRAPH_VERSION` are explicit production pins; review and test provider changelogs before rotating either value.
 - `MEMORIA_SHARE_*` and `MEMORIA_EXPORT_*` expiration and resource limits.
 - secure session cookie flags when HTTPS is active, plus an exact `TRUSTED_PROXIES` IP/CIDR allowlist for the deployment's reverse proxies.
+
+Run `php artisan memoria:release-check` inside the configured release runtime before migration or traffic cutover. It fails on placeholder legal, security, mail, storage, scanner, database, queue, and runtime settings.
 
 ## Privacy model in one minute
 

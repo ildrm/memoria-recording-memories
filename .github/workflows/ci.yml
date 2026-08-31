@@ -43,6 +43,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Prepare test environment
+        run: cp .env.example .env
+
       - uses: shivammathur/setup-php@v2
         with:
           php-version: '8.5'
@@ -76,7 +79,9 @@ jobs:
         run: php artisan migrate:fresh --seed --force
 
       - name: Format check
-        run: vendor/bin/pint --test
+        run: |
+          vendor/bin/pint --format agent
+          git diff --exit-code
 
       - name: Static analysis
         run: composer analyse
@@ -86,3 +91,71 @@ jobs:
 
       - name: Test
         run: php artisan test --compact
+
+  production-image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build production image
+        run: docker build --target production --tag memoria:ci .
+
+      - name: Verify runtime extensions and limits
+        run: |
+          docker run --rm --entrypoint php memoria:ci -r '
+          foreach (["exif", "gd", "intl", "opcache", "pdo_pgsql", "redis", "sockets", "zip"] as $extension) {
+              if (! extension_loaded($extension)) {
+                  fwrite(STDERR, "Missing extension: {$extension}\n");
+                  exit(1);
+              }
+          }
+          if (!(gd_info()["WebP Support"] ?? false)) {
+              fwrite(STDERR, "GD WebP support is unavailable.\n");
+              exit(1);
+          }
+          foreach (["memory_limit" => "512M", "upload_max_filesize" => "21M", "post_max_size" => "25M", "max_execution_time" => "0", "opcache.validate_timestamps" => "0"] as $setting => $expected) {
+              if (ini_get($setting) !== $expected) {
+                  fwrite(STDERR, "Unexpected {$setting}: ".ini_get($setting)."\n");
+                  exit(1);
+              }
+          }
+          foreach (["display_errors", "display_startup_errors", "expose_php"] as $setting) {
+              if (filter_var(ini_get($setting), FILTER_VALIDATE_BOOL)) {
+                  fwrite(STDERR, "Unsafe {$setting}: ".ini_get($setting)."\n");
+                  exit(1);
+              }
+          }
+          '
+
+      - name: Verify ClamAV scanning engine
+        run: |
+          docker run --rm --entrypoint sh memoria:ci -ec '
+          mkdir -p /tmp/clamav-ci
+          echo "44d88612fea8a8f36de82e1278abb02f:68:Memoria.EICAR.Test" > /tmp/clamav-ci/memoria.hdb
+          echo "WDVPIVAlQEFQWzRcUFpYNTQoUF4pN0NDKTd9JEVJQ0FSLVNUQU5EQVJELUFOVElWSVJVUy1URVNULUZJTEUhJEgrSCo=" | base64 -d > /tmp/eicar
+          clamscan --database=/tmp/clamav-ci --no-summary /tmp/eicar | grep -Fq "FOUND"
+          '
+
+      - name: Verify image boundary and application boot
+        run: |
+          docker run --rm --entrypoint sh memoria:ci -ec '
+          test ! -e /var/www/html/.env
+          test ! -e /var/www/html/tests
+          test ! -e /var/www/html/docs
+          test ! -e /var/www/html/database/database.sqlite
+          test ! -e /var/www/html/public/hot
+          test ! -e /var/www/html/public/storage
+          test -z "$(find /var/www/html/storage/app -type f -print -quit)"
+          php-fpm -tt
+          php-fpm -tt 2>&1 | grep -Fq "request_terminate_timeout = 0s"
+          php-fpm -tt 2>&1 | grep -Fq "php_admin_value[max_execution_time] = 0"
+          '
+          test "$(docker run --rm --entrypoint id memoria:ci -u)" -ne 0
+          docker run --rm --entrypoint clamscan memoria:ci --version | grep -Fq "ClamAV"
+          docker run --rm --entrypoint php \
+            -e APP_KEY=base64:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA= \
+            -e CACHE_STORE=array \
+            -e QUEUE_CONNECTION=sync \
+            -e SESSION_DRIVER=array \
+            memoria:ci artisan route:list --except-vendor

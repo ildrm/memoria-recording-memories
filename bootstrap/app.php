@@ -2,10 +2,10 @@
 
 use App\Exceptions\SanitizedDatabaseException;
 use App\Http\Middleware\RequestCorrelation;
+use Illuminate\Database\QueryException;
 use Illuminate\Foundation\Application;
 use Illuminate\Foundation\Configuration\Exceptions;
 use Illuminate\Foundation\Configuration\Middleware;
-use Illuminate\Database\QueryException;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Context;
 use Symfony\Component\HttpFoundation\Response;
@@ -17,6 +17,17 @@ return Application::configure(basePath: dirname(__DIR__))
         health: '/up',
     )
     ->withMiddleware(function (Middleware $middleware): void {
+        $middleware->trustHosts(
+            at: static function (): array {
+                $host = parse_url((string) config('app.url'), PHP_URL_HOST);
+                $canonicalHost = is_string($host)
+                    ? strtolower(rtrim(trim($host, '[]'), '.'))
+                    : '';
+
+                return ['^'.preg_quote($canonicalHost).'$'];
+            },
+            subdomains: false,
+        );
         $middleware->prepend(RequestCorrelation::class);
     })
     ->withExceptions(function (Exceptions $exceptions): void {

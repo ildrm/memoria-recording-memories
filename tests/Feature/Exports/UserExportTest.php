@@ -1,8 +1,10 @@
 <?php
 
 use App\Enums\ExportStatus;
+use App\Jobs\DeleteStoredFile;
 use App\Jobs\ExpireUserExports;
 use App\Jobs\GenerateUserExport;
+use App\Models\Attachment;
 use App\Models\Comment;
 use App\Models\Entry;
 use App\Models\EntryShare;
@@ -11,6 +13,7 @@ use App\Models\Export;
 use App\Models\Journal;
 use App\Models\Person;
 use App\Models\Publication;
+use App\Models\PublicationMedia;
 use App\Models\PublicationTarget;
 use App\Models\PublicationVersion;
 use App\Models\Reaction;
@@ -24,9 +27,9 @@ use App\Models\Tag;
 use App\Models\User;
 use App\Notifications\ExportReadyNotification;
 use App\Services\UserExportArchiveBuilder;
-use Illuminate\Database\Events\QueryExecuted;
 use Illuminate\Database\Eloquent\Factories\Sequence;
 use Illuminate\Database\Eloquent\ModelNotFoundException;
+use Illuminate\Database\Events\QueryExecuted;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Notification;
 use Illuminate\Support\Facades\Queue;
@@ -267,6 +270,122 @@ test('the manifest covers owned history sharing community and social metadata wi
         ->and($metadata)->not->toContain('never-export-provider-post-metadata')
         ->and($metadata)->not->toContain('never-export-failure-context')
         ->and($metadata)->not->toContain(hash('sha256', 'never-export-idempotency-source'));
+});
+
+test('a portable export includes every current owned media boundary and publication topics', function (): void {
+    Storage::fake('local');
+    $owner = User::factory()->create();
+    $entry = Entry::factory()->for($owner, 'owner')->create();
+    $attachmentBytes = 'verified private attachment bytes';
+    $attachment = Attachment::factory()->for($entry)->create([
+        'user_id' => $owner->getKey(),
+        'path' => 'private/attachments/portable-note.txt',
+        'original_name' => 'Portable note.txt',
+        'mime_type' => 'text/plain',
+        'extension' => 'txt',
+        'size_bytes' => strlen($attachmentBytes),
+        'sha256' => hash('sha256', $attachmentBytes),
+    ]);
+    Storage::disk('local')->put($attachment->path, $attachmentBytes);
+
+    $publication = Publication::factory()->for($owner, 'owner')->create([
+        'topics' => ['family', 'travel'],
+    ]);
+    $publicationBytes = 'verified sanitized publication image';
+    $medium = PublicationMedia::factory()->for($publication)->create([
+        'path' => 'publication-media/portable/original.jpg',
+        'size_bytes' => strlen($publicationBytes),
+        'metadata' => ['width' => 1400, 'height' => 933],
+    ]);
+    Storage::disk('local')->put($medium->path, $publicationBytes);
+
+    $journal = Journal::factory()->for($owner, 'owner')->create([
+        'cover_path' => 'private/journals/portable-cover.png',
+    ]);
+    $person = Person::factory()->for($owner, 'owner')->create([
+        'avatar_path' => 'private/people/portable-avatar.webp',
+    ]);
+    Storage::disk('local')->put($journal->cover_path, 'journal cover bytes');
+    Storage::disk('local')->put($person->avatar_path, 'person avatar bytes');
+    $owner->profile()->update([
+        'avatar_path' => 'profiles/portable-avatar.jpg',
+        'avatar_disk' => 'local',
+    ]);
+    Storage::disk('local')->put('profiles/portable-avatar.jpg', 'profile avatar bytes');
+
+    $export = Export::factory()->for($owner, 'owner')->create([
+        'options' => ['formats' => ['json'], 'include_attachments' => true],
+    ]);
+    $result = app(UserExportArchiveBuilder::class)->build($export, $owner);
+
+    $zip = new ZipArchive;
+    expect($zip->open(Storage::disk('local')->path($result['path'])))->toBeTrue();
+    $manifest = json_decode((string) $zip->getFromName('manifest.json'), true, flags: JSON_THROW_ON_ERROR);
+    $publicationJson = (string) $zip->getFromName("publications/{$publication->getKey()}.json");
+
+    expect($zip->locateName("media/{$entry->getKey()}/{$attachment->getKey()}-portable-note.txt"))->toBeInt()
+        ->and($zip->locateName("media/publications/{$publication->getKey()}/{$medium->getKey()}-original.jpg"))->toBeInt()
+        ->and($zip->locateName('media/profile/avatar.jpg'))->toBeInt()
+        ->and($zip->locateName("media/journals/{$journal->getKey()}-cover.png"))->toBeInt()
+        ->and($zip->locateName("media/people/{$person->getKey()}-avatar.webp"))->toBeInt()
+        ->and($zip->getFromName('metadata/attachments.json'))->not->toBeFalse()
+        ->and($zip->getFromName('metadata/publication-media.json'))->not->toBeFalse()
+        ->and($publicationJson)->toContain('family')
+        ->and($publicationJson)->toContain('travel')
+        ->and($manifest['schema'])->toBe('memoria-export-v2')
+        ->and($manifest['counts'])->toMatchArray([
+            'attachment_records' => 1,
+            'publication_media_records' => 1,
+            'attachments' => 1,
+            'publication_media_files' => 1,
+            'profile_images' => 1,
+            'journal_images' => 1,
+            'person_images' => 1,
+        ]);
+    $zip->close();
+});
+
+test('an active clean attachment missing from storage fails instead of producing a silent partial export', function (): void {
+    Storage::fake('local');
+    $owner = User::factory()->create();
+    $entry = Entry::factory()->for($owner, 'owner')->create();
+    Attachment::factory()->for($entry)->create([
+        'user_id' => $owner->getKey(),
+        'path' => 'private/attachments/missing-clean-file.jpg',
+    ]);
+    $export = Export::factory()->for($owner, 'owner')->create([
+        'options' => ['formats' => ['json'], 'include_attachments' => true],
+    ]);
+
+    expect(fn () => app(UserExportArchiveBuilder::class)->build($export, $owner))
+        ->toThrow(RuntimeException::class, 'expected export media object is missing');
+});
+
+test('a failed stored archive is durably scheduled for cleanup', function (): void {
+    Queue::fake([DeleteStoredFile::class]);
+    config(['memoria.disks.exports' => 'failing_exports']);
+    $owner = User::factory()->create();
+    $export = Export::factory()->for($owner, 'owner')->create([
+        'options' => ['formats' => ['json'], 'include_attachments' => false],
+    ]);
+    $disk = Mockery::mock();
+    $disk->shouldReceive('writeStream')->once()->andReturnTrue();
+    $disk->shouldReceive('size')->once()->andThrow(new RuntimeException('storage size unavailable'));
+    $disk->shouldReceive('delete')->once()->andReturnFalse();
+    Storage::shouldReceive('disk')
+        ->with('failing_exports')
+        ->times(3)
+        ->andReturn($disk);
+
+    expect(fn () => app(UserExportArchiveBuilder::class)->build($export, $owner))
+        ->toThrow(RuntimeException::class, 'storage size unavailable');
+
+    $this->assertDatabaseHas('stored_file_deletions', [
+        'disk' => 'failing_exports',
+        'reason' => 'failed_user_export_archive',
+        'completed_at' => null,
+    ]);
+    Queue::assertNotPushed(DeleteStoredFile::class);
 });
 
 test('large historical metadata is exported in ordered primary key chunks', function (): void {

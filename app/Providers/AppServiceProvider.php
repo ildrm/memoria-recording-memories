@@ -4,6 +4,8 @@ namespace App\Providers;
 
 use App\Contracts\AttachmentScanner;
 use App\Contracts\SocialPublisherRegistry;
+use App\Http\Middleware\PrivateResponse;
+use App\Http\Middleware\SecurityHeaders;
 use App\Models\User;
 use App\Services\AttachmentScanning\ClamAvAttachmentScanner;
 use App\Services\AttachmentScanning\FakeAttachmentScanner;
@@ -31,6 +33,7 @@ use Illuminate\Support\Facades\RateLimiter;
 use Illuminate\Support\Facades\Route;
 use Illuminate\Support\ServiceProvider;
 use Illuminate\Support\Str;
+use Livewire\Features\SupportFileUploads\FilePreviewController;
 use Livewire\Livewire;
 
 class AppServiceProvider extends ServiceProvider
@@ -77,6 +80,12 @@ class AppServiceProvider extends ServiceProvider
      */
     public function boot(): void
     {
+        FilePreviewController::$middleware = [
+            'web',
+            PrivateResponse::class,
+            SecurityHeaders::class,
+        ];
+
         Model::preventLazyLoading(! app()->isProduction());
         Model::preventSilentlyDiscardingAttributes(! app()->isProduction());
         Model::preventAccessingMissingAttributes(! app()->isProduction());
@@ -203,7 +212,12 @@ class AppServiceProvider extends ServiceProvider
 
         Livewire::setUpdateRoute(
             fn (callable|array|string $handle, string $path): RouteDefinition => Route::post($path, $handle)
-                ->middleware(['web', 'throttle:livewire-updates']),
+                ->middleware([
+                    'web',
+                    'throttle:livewire-updates',
+                    PrivateResponse::class,
+                    SecurityHeaders::class,
+                ]),
         );
 
         $this->registerSecurityAuditHooks();

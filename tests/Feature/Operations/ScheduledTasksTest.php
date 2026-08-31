@@ -10,6 +10,7 @@ use App\Enums\PublicationTargetStatus;
 use App\Enums\ReminderFrequency;
 use App\Jobs\DeleteStoredFile;
 use App\Jobs\DispatchDueReminders;
+use App\Jobs\DispatchPendingStoredFileDeletions;
 use App\Jobs\DispatchScheduledPublications;
 use App\Jobs\ExpireUserExports;
 use App\Jobs\PublishScheduledPublication;
@@ -272,4 +273,41 @@ test('a storage refusal remains in the durable cleanup ledger for retry', functi
         ->and($pending->completed_at)->toBeNull()
         ->and($pending->encrypted_path)->not->toBeNull()
         ->and($pending->last_error_code)->toBe('storage_delete_failed');
+});
+
+test('an exhausted personal file cleanup is requeued after the recovery interval', function (): void {
+    Queue::fake([DeleteStoredFile::class]);
+    config()->set('memoria.file_cleanup.retry_failed_after_hours', 24);
+
+    $dueDeletionId = app(StoredFileCleanup::class)->schedule(
+        'local',
+        'private/due-personal-file.jpg',
+        'test_exhausted_cleanup_recovery',
+        dispatchImmediately: false,
+    );
+    $coolingDownDeletionId = app(StoredFileCleanup::class)->schedule(
+        'local',
+        'private/cooling-down-personal-file.jpg',
+        'test_exhausted_cleanup_recovery',
+        dispatchImmediately: false,
+    );
+    DB::table('stored_file_deletions')->where('id', $dueDeletionId)->update([
+        'failed_at' => now()->subHours(25),
+        'last_attempted_at' => now()->subHours(25),
+    ]);
+    DB::table('stored_file_deletions')->where('id', $coolingDownDeletionId)->update([
+        'failed_at' => now()->subHours(23),
+        'last_attempted_at' => now()->subHours(23),
+    ]);
+
+    (new DispatchPendingStoredFileDeletions)->handle();
+
+    Queue::assertPushed(
+        DeleteStoredFile::class,
+        fn (DeleteStoredFile $job): bool => $job->storedFileDeletionId === $dueDeletionId,
+    );
+    Queue::assertNotPushed(
+        DeleteStoredFile::class,
+        fn (DeleteStoredFile $job): bool => $job->storedFileDeletionId === $coolingDownDeletionId,
+    );
 });

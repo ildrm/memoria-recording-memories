@@ -3,7 +3,6 @@
 namespace App\Jobs;
 
 use App\Actions\PublishPublication;
-use App\Enums\PublicationStatus;
 use App\Models\Publication;
 use Carbon\CarbonImmutable;
 use Illuminate\Bus\Queueable;
@@ -47,10 +46,11 @@ class PublishScheduledPublication implements ShouldBeUnique, ShouldQueue
 
     public function handle(PublishPublication $publishPublication): void
     {
-        $publication = Publication::query()->find($this->publicationId);
+        $publication = Publication::query()
+            ->scheduled()
+            ->find($this->publicationId);
+
         if ($publication === null
-            || $publication->status !== PublicationStatus::Scheduled
-            || $publication->scheduled_at === null
             || CarbonImmutable::parse($publication->scheduled_at)->isFuture()
         ) {
             return;

@@ -6,9 +6,11 @@ use App\Enums\SocialProvider;
 use App\Models\SocialAccount;
 use App\Services\Social\Exceptions\PermanentSocialPublishException;
 use App\Services\Social\Exceptions\RetryableSocialPublishException;
+use Illuminate\Contracts\Cache\LockTimeoutException;
 use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Http\Client\PendingRequest;
 use Illuminate\Http\Client\Response;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 
 class SocialAccessTokenRefresher
@@ -19,6 +21,33 @@ class SocialAccessTokenRefresher
 
     public function refreshIfExpired(SocialAccount $account): SocialAccount
     {
+        if ($account->token_expires_at === null || $account->token_expires_at->isFuture()) {
+            return $account;
+        }
+
+        $accountId = (int) $account->getKey();
+
+        try {
+            return Cache::lock(
+                "memoria:social-account:{$accountId}:token-refresh",
+                max(5, (int) config('memoria.social.lock_seconds', 60)),
+            )->block(5, fn (): SocialAccount => $this->refreshExpiredAccount($accountId));
+        } catch (LockTimeoutException) {
+            throw new RetryableSocialPublishException(
+                'The social provider credential refresh is temporarily unavailable.',
+            );
+        }
+    }
+
+    private function refreshExpiredAccount(int $accountId): SocialAccount
+    {
+        $account = SocialAccount::query()->find($accountId);
+        if (! $account instanceof SocialAccount || $account->revoked_at !== null) {
+            throw new PermanentSocialPublishException(
+                'This social account must be reconnected before publishing.',
+            );
+        }
+
         if ($account->token_expires_at === null || $account->token_expires_at->isFuture()) {
             return $account;
         }

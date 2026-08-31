@@ -33,6 +33,11 @@ class ProductionReadinessCommand extends Command
         $this->require($failures, config('app.debug') === false, 'APP_DEBUG must be false.');
         $this->require($failures, $this->reviewedPublicUrl->isValid(config('app.url')), 'APP_URL must be a canonical public HTTPS URL.');
         $this->require($failures, $this->hasSecureApplicationKey(config('app.key')), 'APP_KEY must be a non-placeholder 32-byte key.');
+        $this->require(
+            $failures,
+            $this->hasDeploymentReleaseToken($this->configurationString('livewire.release_token')),
+            'LIVEWIRE_RELEASE_TOKEN must identify this exact deployment with 8-255 non-whitespace characters.',
+        );
 
         $databaseConnection = $this->configurationString('database.default');
         $this->require($failures, $databaseConnection === 'pgsql', 'DB_CONNECTION must be pgsql.');
@@ -131,6 +136,22 @@ class ProductionReadinessCommand extends Command
         return is_string($decodedKey)
             && strlen($decodedKey) === 32
             && count(count_chars($decodedKey, 1)) >= 12;
+    }
+
+    private function hasDeploymentReleaseToken(string $releaseToken): bool
+    {
+        if (preg_match('/\A\S{8,255}\z/u', $releaseToken) !== 1) {
+            return false;
+        }
+
+        return ! in_array(strtolower($releaseToken), [
+            'changeme',
+            'development',
+            'latest',
+            'local',
+            'production',
+            'release',
+        ], true);
     }
 
     private function trustedProxiesAreExplicit(): bool

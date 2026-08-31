@@ -130,10 +130,7 @@ class Entry extends Model
     public function isSharedWith(User $user): bool
     {
         return $this->shares()
-            ->whereNull('revoked_at')
-            ->where(function (Builder $query): void {
-                $query->whereNull('expires_at')->orWhere('expires_at', '>', now());
-            })
+            ->active()
             ->whereBelongsTo($user, 'recipient')
             ->exists();
     }
@@ -149,6 +146,7 @@ class Entry extends Model
             $query->whereBelongsTo($user, 'owner')
                 ->orWhereHas('shares', fn (Builder $shares): Builder => $shares
                     ->whereNull('revoked_at')
+                    ->whereHas('owner', fn (Builder $owner): Builder => $owner->whereNull('disabled_at'))
                     ->where(function (Builder $query): void {
                         $query->whereNull('expires_at')->orWhere('expires_at', '>', now());
                     })

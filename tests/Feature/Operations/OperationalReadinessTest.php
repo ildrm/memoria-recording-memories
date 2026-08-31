@@ -3,6 +3,7 @@
 use App\Filament\App\Pages\Calendar;
 use App\Filament\App\Pages\Search;
 use App\Jobs\GenerateUserExport;
+use App\Jobs\PublishSocialPost;
 use App\Models\AuditEvent;
 use App\Models\Entry;
 use App\Models\Export;
@@ -11,6 +12,7 @@ use Carbon\CarbonImmutable;
 use Database\Seeders\DemoContentSeeder;
 use Database\Seeders\RolesAndPermissionsSeeder;
 use Filament\Facades\Filament;
+use Illuminate\Queue\Middleware\WithoutOverlapping;
 use Illuminate\Support\Facades\Context;
 use Illuminate\Support\Facades\Schema;
 use Illuminate\Support\Facades\Storage;
@@ -92,6 +94,18 @@ test('queue retry windows exceed the longest application job timeout', function 
         ->toBeGreaterThan($longestJobTimeout)
         ->and(config('queue.connections.beanstalkd.retry_after'))
         ->toBeGreaterThan($longestJobTimeout);
+});
+
+test('social publishing has enough time for credential refresh and provider delivery', function (): void {
+    $job = new PublishSocialPost(1);
+    $providerRequestTimeout = (int) config('memoria.social.timeout_seconds');
+    $overlapLock = $job->middleware()[0];
+
+    expect($job->timeout)
+        ->toBeGreaterThanOrEqual($providerRequestTimeout * 2)
+        ->toBeLessThan(120)
+        ->and($overlapLock)->toBeInstanceOf(WithoutOverlapping::class)
+        ->and($overlapLock->expiresAfter)->toBeGreaterThan($job->timeout);
 });
 
 test('a busy calendar remains bounded without hiding the complete monthly count', function (): void {

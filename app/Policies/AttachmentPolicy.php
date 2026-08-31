@@ -4,7 +4,6 @@ namespace App\Policies;
 
 use App\Models\Attachment;
 use App\Models\User;
-use Illuminate\Database\Eloquent\Builder;
 
 class AttachmentPolicy
 {
@@ -20,10 +19,7 @@ class AttachmentPolicy
         }
 
         return $attachment->entry?->shares()
-            ->whereNull('revoked_at')
-            ->where(function (Builder $query): void {
-                $query->whereNull('expires_at')->orWhere('expires_at', '>', now());
-            })
+            ->active()
             ->whereBelongsTo($user, 'recipient')
             ->where('include_attachments', true)
             ->exists() === true;

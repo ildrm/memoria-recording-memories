@@ -51,6 +51,7 @@ class EntryShare extends Model
     {
         return $query
             ->whereNull('revoked_at')
+            ->whereHas('owner', fn (Builder $owner): Builder => $owner->whereNull('disabled_at'))
             ->where(function (Builder $query): void {
                 $query->whereNull('expires_at')->orWhere('expires_at', '>', now());
             });

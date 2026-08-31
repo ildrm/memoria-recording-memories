@@ -50,6 +50,20 @@ test('the production readiness check rejects reserved production hostnames', fun
         ->and(Artisan::output())->toContain('APP_URL must be a canonical public HTTPS URL.');
 });
 
+test('the production readiness check rejects placeholder Livewire release tokens', function (string $releaseToken): void {
+    configureReleaseReadyApplication();
+    config(['livewire.release_token' => $releaseToken]);
+
+    $exitCode = Artisan::call('memoria:release-check');
+
+    expect($exitCode)->toBe(Command::FAILURE)
+        ->and(Artisan::output())
+        ->toContain('LIVEWIRE_RELEASE_TOKEN must identify this exact deployment');
+})->with([
+    'package default' => 'a',
+    'generic placeholder' => 'development',
+]);
+
 test('the production readiness check rejects weak secrets and unresolved delivery configuration', function (): void {
     configureReleaseReadyApplication();
     config([
@@ -67,6 +81,18 @@ test('the production readiness check rejects weak secrets and unresolved deliver
         ->toContain('MAIL_MAILER must resolve only to delivery-capable transports.')
         ->toContain('The selected log channel and every stack member must use a non-debug level.')
         ->toContain('MEMORIA_CLAMAV_BINARY must resolve to ClamAV with a working signature database.');
+});
+
+test('the production readiness check rejects PHP limits below the configured attachment size', function (): void {
+    configureReleaseReadyApplication();
+    config(['memoria.attachments.maximum_kilobytes' => 1024 * 1024]);
+
+    $exitCode = Artisan::call('memoria:release-check');
+
+    expect($exitCode)->toBe(Command::FAILURE)
+        ->and(Artisan::output())
+        ->toContain('PHP upload_max_filesize is below MEMORIA_ATTACHMENT_MAX_KILOBYTES.')
+        ->toContain('PHP post_max_size is below MEMORIA_ATTACHMENT_MAX_KILOBYTES.');
 });
 
 test('the production readiness check requires ClamAV signatures that detect malware', function (): void {
@@ -215,6 +241,7 @@ function configureReleaseReadyApplication(): void
         'logging.channels.single.level' => 'warning',
         'memoria.attachments.scanner.driver' => 'clamav',
         'memoria.attachments.scanner.binary' => createReleaseClamAvFixture(),
+        'memoria.attachments.maximum_kilobytes' => 1024,
         'memoria.disks.private' => 'release_private',
         'memoria.disks.sanitized_media' => 'release_sanitized',
         'memoria.disks.exports' => 'release_exports',
@@ -225,6 +252,7 @@ function configureReleaseReadyApplication(): void
         'filesystems.disks.release_private' => $diskConfiguration('private'),
         'filesystems.disks.release_sanitized' => $diskConfiguration('sanitized-media'),
         'filesystems.disks.release_exports' => $diskConfiguration('exports'),
+        'livewire.release_token' => '341bcddce9eae98b321d2e986163b8d9f0ba6553',
         'livewire.temporary_file_upload.disk' => 'release_private',
     ]);
 }

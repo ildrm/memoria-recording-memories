@@ -19,10 +19,15 @@ use App\Models\User;
 use App\Services\AuditRecorder;
 use App\Services\Social\Exceptions\PermanentSocialPublishException;
 use App\Services\Social\Exceptions\RetryableSocialPublishException;
+use App\Services\Social\RemoteSocialPostCleanup;
+use App\Services\Social\SocialAccessTokenRefresher;
 use App\Services\Social\SocialPublishResult;
+use Illuminate\Contracts\Cache\Lock;
+use Illuminate\Contracts\Cache\LockTimeoutException;
 use Illuminate\Http\Client\Request;
-use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Crypt;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Queue;
 use Illuminate\Validation\ValidationException;
@@ -69,6 +74,7 @@ test('oauth credentials are encrypted at rest and hidden from serialization', fu
 test('an expired X credential is refreshed through the bounded OAuth flow before delivery', function (): void {
     config()->set('services.x.client_id', 'configured-x-client');
     config()->set('services.x.client_secret', 'configured-x-secret');
+    Http::preventStrayRequests();
     Http::fake([
         'https://api.x.com/2/oauth2/token' => Http::response([
             'access_token' => 'rotated-access-token',
@@ -109,6 +115,71 @@ test('an expired X credential is refreshed through the bounded OAuth flow before
             'Authorization',
             'Basic '.base64_encode('configured-x-client:configured-x-secret'),
         ));
+});
+
+test('a waiting X refresh re-reads rotated credentials and skips a duplicate OAuth request', function (): void {
+    config()->set('services.x.client_id', 'configured-x-client');
+    config()->set('services.x.client_secret', 'configured-x-secret');
+    Http::preventStrayRequests();
+    Http::fake([
+        'https://api.x.com/2/oauth2/token' => Http::response([
+            'access_token' => 'duplicate-access-token',
+            'refresh_token' => 'duplicate-refresh-token',
+            'expires_in' => 7200,
+        ]),
+    ]);
+    $owner = User::factory()->create();
+    $staleAccount = SocialAccount::factory()->expired()->for($owner, 'owner')->create([
+        'provider' => SocialProvider::X,
+        'access_token' => 'expired-access-token',
+        'refresh_token' => 'spent-refresh-token',
+    ]);
+    $rotatedAccount = SocialAccount::query()->findOrFail($staleAccount->getKey());
+    $rotatedAccount->forceFill([
+        'access_token' => 'winner-access-token',
+        'refresh_token' => 'winner-refresh-token',
+        'token_expires_at' => now()->addHour(),
+        'last_refreshed_at' => now(),
+    ])->save();
+
+    $result = app(SocialAccessTokenRefresher::class)->refreshIfExpired($staleAccount);
+
+    expect($result->getKey())->toBe($staleAccount->getKey())
+        ->and($result->access_token)->toBe('winner-access-token')
+        ->and($result->refresh_token)->toBe('winner-refresh-token')
+        ->and($result->token_expires_at?->isFuture())->toBeTrue();
+    Http::assertNothingSent();
+});
+
+test('an expired X refresh reports account lock contention as retryable', function (): void {
+    config()->set('memoria.social.lock_seconds', 45);
+    Http::preventStrayRequests();
+    Http::fake([
+        'https://api.x.com/2/oauth2/token' => Http::response([
+            'access_token' => 'must-not-be-requested',
+            'expires_in' => 7200,
+        ]),
+    ]);
+    $owner = User::factory()->create();
+    $account = SocialAccount::factory()->expired()->for($owner, 'owner')->create([
+        'provider' => SocialProvider::X,
+    ]);
+    $lock = Mockery::mock(Lock::class);
+    $lock->shouldReceive('block')
+        ->once()
+        ->with(5, Mockery::type(Closure::class))
+        ->andThrow(new LockTimeoutException);
+    Cache::shouldReceive('lock')
+        ->once()
+        ->with("memoria:social-account:{$account->getKey()}:token-refresh", 45)
+        ->andReturn($lock);
+
+    expect(fn () => app(SocialAccessTokenRefresher::class)->refreshIfExpired($account))
+        ->toThrow(
+            RetryableSocialPublishException::class,
+            'The social provider credential refresh is temporarily unavailable.',
+        );
+    Http::assertNothingSent();
 });
 
 test('the queued provider boundary records success once and retries are idempotent', function (): void {
@@ -328,7 +399,7 @@ test('failed cancellation compensation queues a deduplicated durable retry with 
         ->and($post->failures()->latest('id')->first()?->error_code)->toBe('cancelled_remote_cleanup_failed');
     Queue::assertPushed(DeleteRemoteSocialPost::class, 1);
 
-    $duplicateId = app(\App\Services\Social\RemoteSocialPostCleanup::class)->schedule(
+    $duplicateId = app(RemoteSocialPostCleanup::class)->schedule(
         $post->refresh(),
         'cancelled_dispatch_compensation_failed',
         $account,

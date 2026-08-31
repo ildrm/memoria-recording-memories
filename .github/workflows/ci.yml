@@ -104,7 +104,7 @@ jobs:
       - name: Verify runtime extensions and limits
         run: |
           docker run --rm --entrypoint php memoria:ci -r '
-          foreach (["exif", "gd", "intl", "opcache", "pdo_pgsql", "redis", "sockets", "zip"] as $extension) {
+          foreach (["exif", "gd", "intl", "Zend OPcache", "pdo_pgsql", "redis", "sockets", "zip"] as $extension) {
               if (! extension_loaded($extension)) {
                   fwrite(STDERR, "Missing extension: {$extension}\n");
                   exit(1);
@@ -147,6 +147,9 @@ jobs:
           test ! -e /var/www/html/public/hot
           test ! -e /var/www/html/public/storage
           test -z "$(find /var/www/html/storage/app -type f -print -quit)"
+          test ! -w /var/www/html
+          test -w /var/www/html/storage
+          test -w /var/www/html/bootstrap/cache
           php-fpm -tt
           php-fpm -tt 2>&1 | grep -Fq "request_terminate_timeout = 0s"
           php-fpm -tt 2>&1 | grep -Fq "php_admin_value[max_execution_time] = 0"

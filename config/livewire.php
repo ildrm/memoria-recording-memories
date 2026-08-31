@@ -256,7 +256,7 @@ return [
     |
     */
 
-    'release_token' => 'a',
+    'release_token' => env('LIVEWIRE_RELEASE_TOKEN', 'a'),
 
     /*
     |---------------------------------------------------------------------------

@@ -2,8 +2,8 @@
 
 namespace App\Services\Social;
 
-use App\Enums\SocialProvider;
 use App\Enums\SocialPostStatus;
+use App\Enums\SocialProvider;
 use App\Jobs\DeleteRemoteSocialPost;
 use App\Models\SocialAccount;
 use App\Models\SocialPost;
@@ -20,8 +20,7 @@ class RemoteSocialPostCleanup
         string $reason,
         ?SocialAccount $credentialSnapshot = null,
         bool $dispatchImmediately = true,
-    ): ?int
-    {
+    ): ?int {
         $remotePostId = $socialPost->remote_post_id;
         $provider = $this->provider($socialPost);
         $account = $credentialSnapshot ?? SocialAccount::query()->find($socialPost->social_account_id);

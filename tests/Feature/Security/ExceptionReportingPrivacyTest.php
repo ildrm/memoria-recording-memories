@@ -32,7 +32,7 @@ test('database failures are reported without query text or private bindings', fu
         });
     app()->instance(LoggerInterface::class, $logger);
 
-    $driverException = new \PDOException(
+    $driverException = new PDOException(
         "Constraint failure containing {$privateSentinel}",
         23000,
     );

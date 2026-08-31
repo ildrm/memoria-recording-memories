@@ -1,8 +1,8 @@
 <?php
 
-use App\Actions\DeleteUserAccount;
 use App\Actions\ArchivePublication;
 use App\Actions\CopyAttachmentToPublication;
+use App\Actions\DeleteUserAccount;
 use App\Actions\DisconnectSocialAccount;
 use App\Actions\ModeratePublicPublication;
 use App\Actions\RemovePublicationMedia;
@@ -30,12 +30,12 @@ use App\Services\Social\Exceptions\RetryableSocialPublishException;
 use App\Services\Social\Exceptions\SanitizedSocialIntegrationException;
 use App\Services\Social\RemoteSocialPostCleanup;
 use Database\Seeders\RolesAndPermissionsSeeder;
+use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\Crypt;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Exceptions;
 use Illuminate\Support\Facades\Queue;
 use Illuminate\Support\Facades\Storage;
-use Illuminate\Http\UploadedFile;
 use Mockery\MockInterface;
 
 /**

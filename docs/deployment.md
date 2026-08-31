@@ -30,6 +30,7 @@ Provide environment values through the platform's secret manager. Do not bake `.
 Required groups:
 
 - `APP_KEY`, canonical HTTPS `APP_URL`, locale/timezone, and `APP_DEBUG=false`
+- a per-release `LIVEWIRE_RELEASE_TOKEN` such as the immutable Git commit SHA or image digest
 - distinct `MEMORIA_PRIVACY_NOTICE_URL` and `MEMORIA_TERMS_OF_SERVICE_URL` values pointing to operator-reviewed public HTTPS documents
 - PostgreSQL credentials with TLS requirements
 - Redis connection and `CACHE_STORE=redis`, `SESSION_DRIVER=redis`, `QUEUE_CONNECTION=redis`
@@ -42,6 +43,8 @@ Required groups:
 - an infrastructure or application monitoring integration configured outside Memoria with body/header scrubbing; the application does not ship a vendor-specific DSN client
 
 Keep `APP_KEY` in a separately backed-up secret store. Losing it makes encrypted TOTP/OAuth values unreadable; exposing it compromises them.
+
+`LIVEWIRE_RELEASE_TOKEN` is a public deployment identifier embedded in Livewire browser snapshots, not a secret. Give every process running the same artifact the same value, change it whenever application code changes, and never derive it from `APP_KEY`. During a rolling release, old processes keep the old token until they are drained while the new artifact receives its new token; do not reuse one token across different application revisions. Run `php artisan optimize` only after the release environment has injected the final value so the configuration cache contains the correct token.
 
 ## Enable real social delivery
 
@@ -83,7 +86,7 @@ Disconnecting an account cancels local pending/scheduled work and first writes e
    php artisan memoria:release-check
    ```
 
-   Do not continue while it reports a blocker. This validates canonical/legal URLs, secret shape, resolvable mail/log transports, an operational ClamAV signature database using an in-memory EICAR probe, physical storage boundaries, and PHP/runtime limits; it does not replace infrastructure connectivity checks, signature-freshness monitoring, a staging upload-path test, or legal review.
+   Do not continue while it reports a blocker. This validates canonical/legal URLs, secret shape, the per-deployment Livewire release token, resolvable mail/log transports, an operational ClamAV signature database using an in-memory EICAR probe, physical storage boundaries, and PHP/runtime limits; it does not replace infrastructure connectivity checks, signature-freshness monitoring, a staging upload-path test, or legal review.
 
 4. Put the application into maintenance mode only when a migration cannot be performed online.
 5. Run migrations once:

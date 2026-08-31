@@ -169,7 +169,8 @@ class Publication extends Model
     {
         return $query
             ->where('status', PublicationStatus::Scheduled)
-            ->whereNotNull('scheduled_at');
+            ->whereNotNull('scheduled_at')
+            ->whereHas('owner', fn (Builder $owner): Builder => $owner->whereNull('disabled_at'));
     }
 
     protected function casts(): array

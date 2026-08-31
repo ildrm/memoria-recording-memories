@@ -48,7 +48,7 @@ class PublishSocialPost implements ShouldBeUnique, ShouldQueue
 
     public int $maxExceptions = 4;
 
-    public int $timeout = 30;
+    public int $timeout = 90;
 
     public int $uniqueFor = 7200;
 
@@ -74,7 +74,10 @@ class PublishSocialPost implements ShouldBeUnique, ShouldQueue
     {
         return [
             (new WithoutOverlapping('social-post:'.$this->socialPostId))
-                ->expireAfter((int) config('memoria.social.lock_seconds', 60))
+                ->expireAfter(max(
+                    (int) config('memoria.social.lock_seconds', 60),
+                    $this->timeout + 30,
+                ))
                 ->dontRelease(),
         ];
     }

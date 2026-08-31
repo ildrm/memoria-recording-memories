@@ -67,6 +67,8 @@ COPY php-fpm-production.conf /usr/local/etc/php-fpm.d/zz-memoria-production.conf
 COPY --from=assets /app/public/build ./public/build
 RUN mkdir -p bootstrap/cache storage/app/private storage/app/public storage/framework/cache/data storage/framework/sessions storage/framework/testing storage/framework/views storage/logs \
     && composer dump-autoload --no-dev --classmap-authoritative \
-    && chown -R www-data:www-data storage bootstrap/cache
+    && chown -R www-data:www-data storage bootstrap/cache \
+    && chown root:root /var/www/html \
+    && chmod 0755 /var/www/html
 USER www-data
 CMD ["php-fpm", "-F"]

@@ -24,6 +24,8 @@ class PublicLegalRoutesTest extends TestCase
 
     public function test_non_production_robots_disallow_the_entire_site(): void
     {
+        $this->assertFileDoesNotExist(public_path('robots.txt'));
+
         $this->get(route('robots'))
             ->assertOk()
             ->assertHeader('Content-Type', 'text/plain; charset=UTF-8')

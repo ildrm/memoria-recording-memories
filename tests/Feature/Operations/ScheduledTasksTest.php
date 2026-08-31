@@ -77,6 +77,35 @@ test('a local publication time is stored in UTC and dispatched once when due', f
     expect($scheduled->versions()->where('reason', 'scheduled_publish')->count())->toBe(1);
 });
 
+test('a disabled owner cannot dispatch or publish an already scheduled publication', function (): void {
+    CarbonImmutable::setTestNow('2026-03-02 06:00:00 UTC');
+    Queue::fake();
+    $owner = User::factory()->create();
+    $publication = Publication::factory()->for($owner, 'owner')->create();
+    app(ConfirmPublicationPrivacyReview::class)->handle($publication, $owner);
+    app(RecordPublicationPreview::class)->handle($publication, $owner);
+    $scheduled = app(SchedulePublication::class)->handle(
+        publication: $publication,
+        owner: $owner,
+        scheduledAt: now()->addMinute()->toIso8601String(),
+        timezone: 'UTC',
+        privacyReviewConfirmed: true,
+        previewConfirmed: true,
+        publishToWebsite: true,
+        socialProviders: [],
+    );
+    $owner->disable();
+    CarbonImmutable::setTestNow('2026-03-02 06:02:00 UTC');
+
+    app(DispatchScheduledPublications::class)->handle();
+    (new PublishScheduledPublication((int) $scheduled->getKey()))
+        ->handle(app(PublishPublication::class));
+
+    Queue::assertNotPushed(PublishScheduledPublication::class);
+    expect($scheduled->refresh()->status)->toBe(PublicationStatus::Scheduled)
+        ->and($scheduled->published_at)->toBeNull();
+});
+
 test('publication scheduling rejects nonexistent and ambiguous daylight saving wall times', function (string $scheduledAt, string $expectedMessage): void {
     CarbonImmutable::setTestNow('2026-01-01 00:00:00 UTC');
     $owner = User::factory()->create();

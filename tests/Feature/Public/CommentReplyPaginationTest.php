@@ -46,13 +46,15 @@ it('links to every approved reply and paginates the complete thread', function (
         ->assertDontSee('Thread reply 11')
         ->assertDontSee('Pending reply must stay hidden');
 
-    $this->get($threadUrl)
+    $threadResponse = $this->get($threadUrl)
         ->assertOk()
         ->assertHeader('X-Robots-Tag', 'noindex, nofollow, noarchive')
         ->assertSee('Thread reply 01')
         ->assertSee('Thread reply 20')
         ->assertDontSee('Thread reply 21')
         ->assertDontSee('Pending reply must stay hidden');
+
+    expect(substr_count((string) $threadResponse->getContent(), '<main'))->toBe(1);
 
     $this->get($threadUrl.'?replies_page=2')
         ->assertOk()

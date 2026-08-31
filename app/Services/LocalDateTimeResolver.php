@@ -15,8 +15,7 @@ class LocalDateTimeResolver
         DateTimeInterface|string $value,
         string $timezone,
         string $field = 'scheduled_at',
-    ): CarbonImmutable
-    {
+    ): CarbonImmutable {
         $timezoneObject = $this->timezone($timezone);
 
         if ($value instanceof DateTimeInterface) {

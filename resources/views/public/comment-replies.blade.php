@@ -5,7 +5,7 @@
 @section('robots', 'noindex,nofollow,noarchive')
 
 @section('content')
-    <main class="mx-auto w-full max-w-[52rem] px-5 py-14 sm:px-8 sm:py-20" aria-labelledby="replies-title">
+    <section class="mx-auto w-full max-w-[52rem] px-5 py-14 sm:px-8 sm:py-20" aria-labelledby="replies-title">
         <a href="{{ route('publications.show', ['username' => $profile->username, 'publicationSlug' => $publication->slug]) }}#comment-{{ $parentComment->getKey() }}" class="button-quiet">
             <span aria-hidden="true">&larr;</span>
             {{ __('Back to the story') }}
@@ -41,5 +41,5 @@
                 {{ $replies->withQueryString()->fragment('replies-title')->onEachSide(1)->links() }}
             </nav>
         @endif
-    </main>
+    </section>
 @endsection

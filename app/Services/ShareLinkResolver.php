@@ -27,7 +27,7 @@ class ShareLinkResolver
             $viewAlreadyCounted,
         ): ShareLink {
             $shareLink = ShareLink::query()
-                ->with(['entry', 'publication'])
+                ->with(['entry', 'publication', 'owner'])
                 ->where('token_hash', $tokenHash)
                 ->lockForUpdate()
                 ->first();
@@ -35,6 +35,10 @@ class ShareLinkResolver
             if ($shareLink === null
                 || $shareLink->revoked_at !== null
                 || ($shareLink->expires_at !== null && $shareLink->expires_at->isPast())
+                || $shareLink->owner === null
+                || $shareLink->owner->disabled_at !== null
+                || ($shareLink->entry_id !== null && $shareLink->entry === null)
+                || ($shareLink->publication_id !== null && $shareLink->publication === null)
                 || (! $viewAlreadyCounted
                     && $shareLink->max_views !== null
                     && $shareLink->view_count >= $shareLink->max_views)
@@ -55,7 +59,7 @@ class ShareLinkResolver
 
             $shareLink->forceFill(['last_accessed_at' => now()])->save();
 
-            return $shareLink->refresh()->loadMissing(['entry', 'publication']);
+            return $shareLink->refresh()->loadMissing(['entry', 'publication', 'owner']);
         });
     }
 }

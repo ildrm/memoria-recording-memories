@@ -17,6 +17,16 @@ beforeEach(function (): void {
     Filament::setCurrentPanel(Filament::getPanel('app'));
 });
 
+test('the created share link renders a panel native clipboard handler', function (): void {
+    session()->flash('created_share_url', 'https://memoria.example.test/shares/one-time-secret');
+
+    $html = view('filament.app.components.created-share-link')->render();
+
+    expect($html)
+        ->toContain('window.navigator.clipboard.writeText')
+        ->toContain('$tooltip');
+});
+
 test('the primary private indexes render while lazy loading is forbidden', function (): void {
     $owner = User::factory()->create();
     $journal = Journal::factory()->for($owner, 'owner')->create(['name' => 'Field notes']);

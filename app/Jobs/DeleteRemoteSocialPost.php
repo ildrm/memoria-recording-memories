@@ -3,8 +3,8 @@
 namespace App\Jobs;
 
 use App\Contracts\SocialPublisherRegistry;
-use App\Enums\SocialProvider;
 use App\Enums\SocialPostStatus;
+use App\Enums\SocialProvider;
 use App\Models\SocialAccount;
 use App\Models\SocialPost;
 use App\Services\AuditRecorder;

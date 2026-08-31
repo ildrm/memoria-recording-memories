@@ -93,6 +93,76 @@ it('enforces unlisted expiry and the explicit attachment inclusion choice', func
     $this->get($expiringAttachmentUrl)->assertNotFound();
 });
 
+it('closes unlisted content and attachment routes when the source memory is deleted', function (): void {
+    Storage::fake('local');
+    $owner = User::factory()->create();
+    $entry = Entry::factory()->for($owner, 'owner')->create();
+    $attachment = Attachment::factory()->for($entry)->for($owner, 'owner')->document()->create([
+        'path' => 'private/attachments/deleted-entry-note.pdf',
+        'download_name' => 'deleted-entry-note.pdf',
+    ]);
+    Storage::disk('local')->put($attachment->path, 'clean document bytes');
+    $created = app(CreateShareLink::class)->handle(
+        entry: $entry,
+        owner: $owner,
+        includeAttachments: true,
+    );
+    $attachmentUrl = route('shares.attachments.show', [
+        'token' => $created->token,
+        'attachment' => $attachment,
+    ]);
+
+    $this->get($created->url)->assertOk();
+    $this->get($attachmentUrl)->assertOk();
+
+    $entry->delete();
+
+    $this->get($created->url)->assertNotFound();
+    $this->get($attachmentUrl)->assertNotFound();
+});
+
+it('closes registered and unlisted shares when their owner is disabled', function (): void {
+    Storage::fake('local');
+    $owner = User::factory()->create();
+    $recipient = User::factory()->create();
+    $entry = Entry::factory()->for($owner, 'owner')->create();
+    $attachment = Attachment::factory()->for($entry)->for($owner, 'owner')->document()->create([
+        'path' => 'private/attachments/disabled-owner-note.pdf',
+        'download_name' => 'disabled-owner-note.pdf',
+    ]);
+    Storage::disk('local')->put($attachment->path, 'clean document bytes');
+    app(CreateEntryShare::class)->handle(
+        entry: $entry,
+        owner: $owner,
+        recipient: $recipient,
+        includeAttachments: true,
+    );
+    $unlisted = app(CreateShareLink::class)->handle(
+        entry: $entry,
+        owner: $owner,
+        includeAttachments: true,
+    );
+    $unlistedAttachmentUrl = route('shares.attachments.show', [
+        'token' => $unlisted->token,
+        'attachment' => $attachment,
+    ]);
+
+    $owner->disable();
+
+    $this->get($unlisted->url)->assertNotFound();
+    $this->get($unlistedAttachmentUrl)->assertNotFound();
+    $this->actingAs($recipient)
+        ->getJson(route('entries.shared.index'))
+        ->assertOk()
+        ->assertJsonMissing(['entry_id' => $entry->getKey()]);
+    $this->actingAs($recipient)
+        ->getJson(route('entries.shared.show', $entry))
+        ->assertNotFound();
+    $this->actingAs($recipient)
+        ->get(route('attachments.download', $attachment))
+        ->assertForbidden();
+});
+
 it('renders registered shared files and denies downloads after expiry or revocation', function (): void {
     Storage::fake('local');
     $owner = User::factory()->create();

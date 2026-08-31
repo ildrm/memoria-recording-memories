@@ -8,9 +8,9 @@ use App\Services\ShareLinkResolver;
 use App\Services\ShareLinks\InvalidShareLink;
 use App\Services\ShareLinks\InvalidSharePassword;
 use Carbon\CarbonImmutable;
-use Illuminate\Validation\ValidationException;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Validation\ValidationException;
 
 afterEach(function (): void {
     CarbonImmutable::setTestNow();
